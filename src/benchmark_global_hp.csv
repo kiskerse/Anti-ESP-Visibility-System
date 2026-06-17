@@ -1,0 +1,14 @@
+region,ping_ms,avg_tick_ms,p95_tick_ms,compute_ms,tps,budget_ok
+Sao_Paulo,30,30.86,30.91,0.56,32.4,True
+Rio_de_Janeiro,40,40.89,40.94,0.55,24.46,True
+Brasilia,55,55.99,56.34,0.62,17.86,True
+Porto_Alegre,70,70.86,70.92,0.54,14.11,True
+Manaus,120,120.9,121.06,0.57,8.27,True
+Buenos_Aires,80,80.92,81.21,0.6,12.36,True
+Santiago,85,85.88,85.98,0.52,11.64,True
+Los_Angeles,140,140.9,141.09,0.62,7.1,True
+New_York,150,150.91,151.02,0.57,6.63,True
+London,180,180.81,180.85,0.52,5.53,True
+Frankfurt,185,185.89,186.02,0.58,5.38,True
+Tokyo,220,220.91,220.99,0.58,4.53,True
+Sydney,260,260.86,261.04,0.55,3.83,True

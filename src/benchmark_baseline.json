@@ -1,0 +1,100 @@
+{
+  "scenario": "baseline",
+  "config": {
+    "largura": 3200,
+    "altura": 3200,
+    "tamanho_celula": 40,
+    "n_rays": 180
+  },
+  "ticks": 15,
+  "results": {
+    "Sao_Paulo": {
+      "ping_ms": 30,
+      "avg_tick_ms": 55.39,
+      "p95_tick_ms": 60.38,
+      "compute_ms": 25.07,
+      "tps": 18.06,
+      "budget_ok": false
+    },
+    "Rio_de_Janeiro": {
+      "ping_ms": 40,
+      "avg_tick_ms": 65.82,
+      "p95_tick_ms": 78.52,
+      "compute_ms": 25.49,
+      "tps": 15.19,
+      "budget_ok": false
+    },
+    "Brasilia": {
+      "ping_ms": 55,
+      "avg_tick_ms": 79.66,
+      "p95_tick_ms": 80.69,
+      "compute_ms": 24.34,
+      "tps": 12.55,
+      "budget_ok": false
+    },
+    "Belo_Horizonte": {
+      "ping_ms": 48,
+      "avg_tick_ms": 72.7,
+      "p95_tick_ms": 76.33,
+      "compute_ms": 24.37,
+      "tps": 13.76,
+      "budget_ok": false
+    },
+    "Curitiba": {
+      "ping_ms": 52,
+      "avg_tick_ms": 76.82,
+      "p95_tick_ms": 81.65,
+      "compute_ms": 24.51,
+      "tps": 13.02,
+      "budget_ok": false
+    },
+    "Porto_Alegre": {
+      "ping_ms": 70,
+      "avg_tick_ms": 95.05,
+      "p95_tick_ms": 98.63,
+      "compute_ms": 24.71,
+      "tps": 10.52,
+      "budget_ok": false
+    },
+    "Salvador": {
+      "ping_ms": 90,
+      "avg_tick_ms": 114.54,
+      "p95_tick_ms": 118.54,
+      "compute_ms": 24.24,
+      "tps": 8.73,
+      "budget_ok": false
+    },
+    "Fortaleza": {
+      "ping_ms": 110,
+      "avg_tick_ms": 133.94,
+      "p95_tick_ms": 134.71,
+      "compute_ms": 23.64,
+      "tps": 7.47,
+      "budget_ok": false
+    },
+    "Recife": {
+      "ping_ms": 105,
+      "avg_tick_ms": 130.12,
+      "p95_tick_ms": 135.45,
+      "compute_ms": 24.63,
+      "tps": 7.69,
+      "budget_ok": false
+    },
+    "Manaus": {
+      "ping_ms": 120,
+      "avg_tick_ms": 144.95,
+      "p95_tick_ms": 146.1,
+      "compute_ms": 24.63,
+      "tps": 6.9,
+      "budget_ok": false
+    },
+    "Belem": {
+      "ping_ms": 115,
+      "avg_tick_ms": 142.18,
+      "p95_tick_ms": 160.24,
+      "compute_ms": 25.28,
+      "tps": 7.03,
+      "budget_ok": false
+    }
+  }
+}

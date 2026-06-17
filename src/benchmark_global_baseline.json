@@ -1,0 +1,116 @@
+{
+  "scenario": "global_baseline",
+  "config": {
+    "largura": 3200,
+    "altura": 3200,
+    "tamanho_celula": 40,
+    "n_rays": 180
+  },
+  "ticks": 5,
+  "results": {
+    "Sao_Paulo": {
+      "ping_ms": 30,
+      "avg_tick_ms": 52.99,
+      "p95_tick_ms": 55.78,
+      "compute_ms": 22.63,
+      "tps": 18.87,
+      "budget_ok": false
+    },
+    "Rio_de_Janeiro": {
+      "ping_ms": 40,
+      "avg_tick_ms": 61.61,
+      "p95_tick_ms": 62.99,
+      "compute_ms": 21.29,
+      "tps": 16.23,
+      "budget_ok": false
+    },
+    "Brasilia": {
+      "ping_ms": 55,
+      "avg_tick_ms": 76.35,
+      "p95_tick_ms": 77.58,
+      "compute_ms": 21.03,
+      "tps": 13.1,
+      "budget_ok": false
+    },
+    "Porto_Alegre": {
+      "ping_ms": 70,
+      "avg_tick_ms": 91.41,
+      "p95_tick_ms": 91.7,
+      "compute_ms": 21.12,
+      "tps": 10.94,
+      "budget_ok": false
+    },
+    "Manaus": {
+      "ping_ms": 120,
+      "avg_tick_ms": 141.61,
+      "p95_tick_ms": 142.31,
+      "compute_ms": 21.29,
+      "tps": 7.06,
+      "budget_ok": false
+    },
+    "Buenos_Aires": {
+      "ping_ms": 80,
+      "avg_tick_ms": 101.51,
+      "p95_tick_ms": 101.88,
+      "compute_ms": 21.18,
+      "tps": 9.85,
+      "budget_ok": false
+    },
+    "Santiago": {
+      "ping_ms": 85,
+      "avg_tick_ms": 106.16,
+      "p95_tick_ms": 107.42,
+      "compute_ms": 20.82,
+      "tps": 9.42,
+      "budget_ok": false
+    },
+    "Los_Angeles": {
+      "ping_ms": 140,
+      "avg_tick_ms": 162.25,
+      "p95_tick_ms": 164.28,
+      "compute_ms": 21.92,
+      "tps": 6.16,
+      "budget_ok": false
+    },
+    "New_York": {
+      "ping_ms": 150,
+      "avg_tick_ms": 171.41,
+      "p95_tick_ms": 171.99,
+      "compute_ms": 21.09,
+      "tps": 5.83,
+      "budget_ok": false
+    },
+    "London": {
+      "ping_ms": 180,
+      "avg_tick_ms": 201.12,
+      "p95_tick_ms": 201.38,
+      "compute_ms": 20.82,
+      "tps": 4.97,
+      "budget_ok": false
+    },
+    "Frankfurt": {
+      "ping_ms": 185,
+      "avg_tick_ms": 207.1,
+      "p95_tick_ms": 208.01,
+      "compute_ms": 21.79,
+      "tps": 4.83,
+      "budget_ok": false
+    },
+    "Tokyo": {
+      "ping_ms": 220,
+      "avg_tick_ms": 240.73,
+      "p95_tick_ms": 240.98,
+      "compute_ms": 20.44,
+      "tps": 4.15,
+      "budget_ok": false
+    },
+    "Sydney": {
+      "ping_ms": 260,
+      "avg_tick_ms": 281.82,
+      "p95_tick_ms": 282.99,
+      "compute_ms": 21.51,
+      "tps": 3.55,
+      "budget_ok": false
+    }
+  }
+}
