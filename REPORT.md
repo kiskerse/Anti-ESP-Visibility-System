@@ -110,6 +110,8 @@ Em produção no Valorant:
 
 ## 4. Simulação do Wallhack ESP
 
+<video src="https://raw.githubusercontent.com/kiskerse/Valorant-Anti-ESP/main/docs/video/demo-client+wallhack.mp4"></video>
+
 ### 4.1 O que foi simulado
 
 O módulo `wallhack_esp.py` simula dois cenários:
