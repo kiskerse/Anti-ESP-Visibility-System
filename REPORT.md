@@ -76,7 +76,7 @@ não introduz variância de processamento significativa neste protótipo Python.
 
 ## 3. Uso de CPU e GPU
 
-[![Watch the video](https://markdown-videos-api.jorgenkh.no/youtube/HVZZQFaUx_E)](https://www.youtube.com/HVZZQFaUx_E)
+[![Watch the video](https://markdown-videos-api.jorgenkh.no/youtube/HVZZQFaUx_E)](https://youtu.be/HVZZQFaUx_E)
 
 ### 3.1 CPU
 
