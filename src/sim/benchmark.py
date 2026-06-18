@@ -1,32 +1,34 @@
 """
-Benchmark: server-side visibility computation cost under simulated network
-latencies for multiple global regions.
+Benchmark de impacto competitivo do sistema Anti-Wallhack.
 
-Regions are grouped as:
-  - Brazil (internal Riot SA servers)
-  - Latin America (wider region)
-  - North America / Europe / Asia (global comparison)
+Mede três dimensões:
+  1. Custo de compute (raycasting) por tick
+  2. Impacto de latência por região (simula RTT real)
+  3. Qualidade anti pop-in: frequência de transições none→full (pop-in events)
+     e tempo médio em que o DR cobre a transição (DR coverage)
 
-Each scenario measures:
-  - avg_tick_ms  : mean wall-clock time per server tick (visibility + simulated RTT)
-  - tps          : effective server ticks per second
-  - compute_ms   : pure visibility computation time (excluding simulated ping)
-  - p95_tick_ms  : 95th-percentile tick time (tail latency)
-  - budget_ok    : True if avg tick fits within a 16.67 ms server budget (60 TPS)
+Métricas relevantes para gameplay competitivo:
+  - tick_budget_ms   : budget do servidor (1000/server_fps)
+  - compute_ms       : tempo puro de raycasting + classificação
+  - overhead_%       : compute/budget × 100
+  - effective_tps    : ticks/s considerando ping
+  - popin_rate       : transições none→full por tick (0 = perfeito)
+  - dr_coverage_%    : % das transições cobertas pelo DR (ghost visível)
+  - dr_gap_ms        : tempo médio de gap sem cobertura (pop-in real)
 """
 
 from __future__ import annotations
 
+import math
+import random
 import statistics
 import time
 from typing import Any
 
 from sim.game import Game
+from security.state import StateMemory
 
 
-# ---------------------------------------------------------------------------
-# Region ping table (simulated RTT in ms)
-# ---------------------------------------------------------------------------
 REGIONS_BRAZIL: dict[str, int] = {
     "São Paulo":      30,
     "Rio de Janeiro": 40,
@@ -47,113 +49,140 @@ REGIONS_LATAM: dict[str, int] = {
     "Lima":          95,
     "Bogotá":       100,
     "Caracas":      110,
-    "Montevideo":    82,
 }
 
 REGIONS_GLOBAL: dict[str, int] = {
-    "Los Angeles":   140,
-    "New York":      150,
-    "London":        180,
-    "Frankfurt":     185,
-    "São Paulo":      30,
-    "Tokyo":         220,
-    "Seoul":         215,
-    "Sydney":        260,
-    "Singapore":     240,
+    "Los Angeles":  140,
+    "New York":     150,
+    "London":       180,
+    "Frankfurt":    185,
+    "Tokyo":        220,
+    "Seoul":        215,
+    "Sydney":       260,
+    "Singapore":    240,
 }
 
-ALL_REGIONS: dict[str, int] = {**REGIONS_BRAZIL, **REGIONS_LATAM, **REGIONS_GLOBAL}
+ALL_REGIONS = {**REGIONS_BRAZIL, **REGIONS_LATAM, **REGIONS_GLOBAL}
 
 
-# ---------------------------------------------------------------------------
-# Benchmark runner
-# ---------------------------------------------------------------------------
+def _move_enemies_random(state: dict, obstacles: list, map_w: int, map_h: int) -> None:
+    """Move inimigos aleatoriamente respeitando obstáculos (versão headless)."""
+    dirs = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+    for pid, pos in list(state["positions"].items()):
+        if not str(pid).startswith("enemy"):
+            continue
+        x, y, *rest = pos
+        z = rest[0] if rest else 0
+        random.shuffle(dirs)
+        for dx, dy in dirs:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or ny < 0 or nx >= map_w or ny >= map_h:
+                continue
+            blocked = False
+            for obs in obstacles:
+                ox, oy, ow, oh, *_ = obs
+                if ox <= nx <= ox + ow - 1 and oy <= ny <= oy + oh - 1:
+                    blocked = True
+                    break
+            if not blocked:
+                state["positions"][pid] = (nx, ny, z)
+                break
 
-def simulate_ping_benchmark(
+
+def run_benchmark(
     state: dict[str, Any],
     config: dict[str, Any],
     regions: dict[str, int],
-    ticks: int = 200,
+    ticks: int = 100,
+    move_enemies: bool = True,
+    move_every: int = 3,
+    server_fps: int = 60,
 ) -> dict[str, Any]:
-    """Headless benchmark.
+    """Roda benchmark headless e retorna métricas por região."""
 
-    Simulates network RTT by sleeping half-ping before and after each
-    server visibility computation, then records timing statistics.
-    """
-    results: dict[str, Any] = {}
-    game = Game(istate={}, config=config, create_ui=False)
+    import copy
+    game = Game({}, config, create_ui=False)
     game.draw_random_obstacles()
-    state["obstacles"] = game.obstaculos
+    st = copy.deepcopy(state)
+    st["obstacles"] = game.obstaculos
+    memory = StateMemory()
+    memory.set_obstacles(game.obstaculos)
 
-    server_budget_ms = 1000.0 / 60.0  # 60 TPS budget
+    map_w = st["map_width"]
+    map_h = st["map_height"]
+    budget_ms = 1000.0 / server_fps
+    results: dict[str, Any] = {}
+
+    # pré-aquece raios
+    for pid, pos in st["positions"].items():
+        game.compute_lines_of_sight(pid, pos)
 
     for region, ping_ms in regions.items():
-        half_delay = ping_ms / 2000.0  # seconds
-        tick_times: list[float] = []
+        half_delay = ping_ms / 2000.0
         compute_times: list[float] = []
+        tick_times: list[float] = []
 
-        for _ in range(ticks):
+        # métricas de pop-in
+        prev_levels: dict[str, str] = {}
+        popin_events = 0       # transições none → full
+        dr_covered   = 0       # dessas, quantas tinham DR ativo
+        dr_gap_ms_list: list[float] = []
+
+        local_st = copy.deepcopy(st)
+
+        for tick_i in range(ticks):
+            if move_enemies and tick_i % move_every == 0:
+                _move_enemies_random(local_st, game.obstaculos, map_w, map_h)
+
             t0 = time.perf_counter()
-
-            # simulate inbound network delay
             time.sleep(half_delay)
 
-            # pure server-side computation
             tc0 = time.perf_counter()
-            game.compute_lines_of_sight("player1", state["positions"]["player1"])
-            game.update_visibility(
-                state, "player1", memory=None, fov_deg=90.0, radius=8.0, dir_angle=0.0
-            )
+            game.tick(local_st, "player1", memory)
             tc1 = time.perf_counter()
             compute_times.append((tc1 - tc0) * 1000.0)
 
-            # simulate outbound network delay
-            time.sleep(half_delay)
+            # analisa pop-in
+            packet = memory.get_client_packet(config.get("tamanho_celula", 50))
+            for pid in packet.all_pids():
+                if pid == "player1":
+                    continue
+                cur_level  = packet.level(pid)
+                prev_level = prev_levels.get(pid, cur_level)
+                if prev_level == "none" and cur_level == "full":
+                    popin_events += 1
+                    dr_px = packet.get(pid).get("predicted_px")
+                    if dr_px is not None:
+                        dr_covered += 1
+                    else:
+                        # gap real: tick_ms sem cobertura DR
+                        dr_gap_ms_list.append((tc1 - tc0) * 1000.0)
+                prev_levels[pid] = cur_level
 
+            time.sleep(half_delay)
             t1 = time.perf_counter()
             tick_times.append((t1 - t0) * 1000.0)
 
-        avg_tick = statistics.mean(tick_times)
-        p95_tick = sorted(tick_times)[int(len(tick_times) * 0.95)]
         avg_compute = statistics.mean(compute_times)
-        tps = 1000.0 / avg_tick if avg_tick > 0 else 0.0
+        avg_tick    = statistics.mean(tick_times)
+        p95_tick    = sorted(tick_times)[int(len(tick_times) * 0.95)]
+        tps         = 1000.0 / avg_tick if avg_tick > 0 else 0.0
+
+        dr_cov_pct  = (dr_covered / popin_events * 100) if popin_events > 0 else 100.0
+        dr_gap_avg  = statistics.mean(dr_gap_ms_list) if dr_gap_ms_list else 0.0
 
         results[region] = {
-            "ping_ms":        ping_ms,
-            "avg_tick_ms":    round(avg_tick, 2),
-            "p95_tick_ms":    round(p95_tick, 2),
-            "compute_ms":     round(avg_compute, 2),
-            "tps":            round(tps, 2),
-            "budget_ok":      avg_compute <= server_budget_ms,
+            "ping_ms":       ping_ms,
+            "compute_ms":    round(avg_compute, 2),
+            "avg_tick_ms":   round(avg_tick, 2),
+            "p95_tick_ms":   round(p95_tick, 2),
+            "tps":           round(tps, 2),
+            "budget_ms":     round(budget_ms, 2),
+            "budget_ok":     avg_compute <= budget_ms,
+            "overhead_pct":  round(avg_compute / budget_ms * 100, 1),
+            "popin_events":  popin_events,
+            "dr_coverage_pct": round(dr_cov_pct, 1),
+            "dr_gap_ms":     round(dr_gap_avg, 2),
         }
 
     return results
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point (quick smoke-test)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    map_w, map_h, cell = 80, 80, 40
-    cfg = {
-        "largura": map_w * cell,
-        "altura":  map_h * cell,
-        "tamanho_celula": cell,
-        "n_rays": 180,
-    }
-    state = {
-        "map_width":  map_w,
-        "map_height": map_h,
-        "positions":  {"player1": (10, 40, 0), "enemy1": (60, 40, 0)},
-    }
-    res = simulate_ping_benchmark(state, cfg, REGIONS_BRAZIL, ticks=50)
-    print(f"{'Region':<20} {'Ping':>6} {'Avg tick':>10} {'P95':>10} {'Compute':>10} {'TPS':>7} {'Budget OK':>10}")
-    print("-" * 80)
-    for region, v in res.items():
-        ok = "✓" if v["budget_ok"] else "✗"
-        print(
-            f"{region:<20} {v['ping_ms']:>5}ms {v['avg_tick_ms']:>9.2f}ms "
-            f"{v['p95_tick_ms']:>9.2f}ms {v['compute_ms']:>9.2f}ms "
-            f"{v['tps']:>6.2f} {ok:>10}"
-        )

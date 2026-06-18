@@ -3,84 +3,154 @@ import time
 from typing import Any
 
 
-class StateMemory:
-    """Shared memory bridge between server and client.
+# Tipos permitidos de visibilidade
+VALID_LEVELS = {"full", "partial", "position_only", "none"}
 
-    The server is the sole writer; the client only reads.
-    Includes a dead-reckoning layer so the client can predict smooth
-    positions while waiting for the next server update, preventing
-    teleport artifacts without leaking real coordinates.
+
+class ClientPacket:
+    """O que o servidor envia ao cliente por tick.
+
+    O cliente só enxerga este objeto — jamais o state bruto do servidor.
+    Contém apenas o que cada nível de visibilidade permite revelar.
+    """
+
+    def __init__(self, entries: dict[str, dict], obstacles: list) -> None:
+        # entries: {pid: {"level": str, "pos": tuple|None}}
+        self._entries = entries
+        self.obstacles = obstacles  # obstáculos são públicos (o mapa é visível)
+
+    def get(self, pid: str) -> dict:
+        """Retorna o pacote de um jogador específico. Sempre seguro."""
+        return self._entries.get(pid, {"level": "none", "pos": None})
+
+    def all_pids(self) -> list[str]:
+        """Lista de IDs presentes neste pacote."""
+        return list(self._entries.keys())
+
+    def level(self, pid: str) -> str:
+        return self._entries.get(pid, {}).get("level", "none")
+
+    def pos(self, pid: str) -> tuple | None:
+        return self._entries.get(pid, {}).get("pos", None)
+
+
+class StateMemory:
+    """Memória interna do servidor com dead-reckoning.
+
+    O servidor escreve via update().
+    O cliente recebe apenas via get_client_packet() — um snapshot somente-leitura.
+    O cliente nunca tem acesso a este objeto diretamente.
     """
 
     def __init__(self) -> None:
-        self.memory: dict[str, Any] = {}
-        # dead-reckoning state: pid -> {pos, vel, ts}
-        self._dr: dict[str, dict[str, Any]] = {}
+        # estado autorizado por zona: {pid: {"level": str, "pos": tuple|None}}
+        self._state: dict[str, dict] = {}
+        # dead-reckoning: {pid: {"pos": tuple, "vel": tuple, "ts": float}}
+        self._dr: dict[str, dict] = {}
+        # obstáculos (público — o mapa é visível)
+        self._obstacles: list = []
 
     # ------------------------------------------------------------------
-    # Server-side write API
+    # API do servidor (escrita)
     # ------------------------------------------------------------------
 
-    def update_state(self, player_id: str, state: Any) -> None:
-        """Server writes authoritative state for a player."""
-        prev = self.memory.get(player_id)
-        self.memory[player_id] = state
+    def set_obstacles(self, obstacles: list) -> None:
+        self._obstacles = obstacles
 
-        # update dead-reckoning velocity estimate when we have a full position
-        if isinstance(state, dict) and state.get("level") == "full":
-            pos = state.get("pos")
-            if pos is not None:
-                now = time.monotonic()
-                prev_dr = self._dr.get(player_id)
-                if prev_dr is not None and prev_dr.get("pos") is not None:
-                    dt = now - prev_dr["ts"]
-                    if dt > 0:
-                        px, py = prev_dr["pos"][0], prev_dr["pos"][1]
-                        vx = (pos[0] - px) / dt
-                        vy = (pos[1] - py) / dt
-                    else:
-                        vx, vy = 0.0, 0.0
+    def update(self, pid: str, level: str, pos: tuple | None) -> None:
+        """Servidor escreve o resultado de visibilidade para um jogador."""
+        assert level in VALID_LEVELS, f"Nível inválido: {level}"
+
+        self._state[pid] = {"level": level, "pos": pos}
+
+        # atualiza dead-reckoning apenas quando temos posição exata
+        if level == "full" and pos is not None:
+            now = time.monotonic()
+            prev = self._dr.get(pid)
+            if prev is not None:
+                dt = now - prev["ts"]
+                if dt > 0:
+                    vx = (pos[0] - prev["pos"][0]) / dt
+                    vy = (pos[1] - prev["pos"][1]) / dt
                 else:
                     vx, vy = 0.0, 0.0
-                self._dr[player_id] = {"pos": pos, "vel": (vx, vy), "ts": now}
+            else:
+                vx, vy = 0.0, 0.0
+            self._dr[pid] = {"pos": pos, "vel": (vx, vy), "ts": now}
 
-    def get_state(self, player_id: str) -> Any:
-        """Client reads last authoritative state."""
-        return self.memory.get(player_id)
+        # limpa DR quando não visível (evita cheat ler última posição)
+        elif level == "none":
+            dr = self._dr.get(pid)
+            if dr is not None:
+                dt = time.monotonic() - dr["ts"]
+                if dt > 0.25:  # grace period de 250ms para o ghost DR
+                    self._dr.pop(pid, None)
 
-    def get_predicted_pos(self, player_id: str, cell_size: int = 50) -> tuple[float, float] | None:
-        """Return a dead-reckoning predicted pixel position for *player_id*.
+    def remove(self, pid: str) -> None:
+        self._state.pop(pid, None)
+        self._dr.pop(pid, None)
 
-        Used by the client renderer to smoothly extrapolate position between
-        server ticks — no new information is revealed, only extrapolated from
-        what was already received.
+    def clear(self) -> None:
+        self._state.clear()
+        self._dr.clear()
 
-        Returns pixel coords (px, py) or None if insufficient data.
-        """
-        dr = self._dr.get(player_id)
+    # ------------------------------------------------------------------
+    # Dead-reckoning (uso interno do servidor para compor o pacote)
+    # ------------------------------------------------------------------
+
+    def _get_dr_predicted_pos(self, pid: str, cell_size: int) -> tuple[float, float] | None:
+        """Posição extrapolada pelo DR — só usada internamente pelo servidor
+        ao compor o ClientPacket. O cliente nunca chama isso."""
+        dr = self._dr.get(pid)
         if dr is None:
             return None
-        pos = dr.get("pos")
-        if pos is None:
-            return None
-        vx, vy = dr.get("vel", (0.0, 0.0))
         dt = time.monotonic() - dr["ts"]
-        # clamp extrapolation to 250 ms to avoid wild predictions
-        dt = min(dt, 0.25)
-        pred_gx = pos[0] + vx * dt
-        pred_gy = pos[1] + vy * dt
+        if dt > 0.25:
+            self._dr.pop(pid, None)
+            return None
+        vx, vy = dr["vel"]
+        px = dr["pos"][0] + vx * dt
+        py = dr["pos"][1] + vy * dt
         return (
-            pred_gx * cell_size + cell_size / 2,
-            pred_gy * cell_size + cell_size / 2,
+            px * cell_size + cell_size / 2,
+            py * cell_size + cell_size / 2,
         )
 
-    def get_all_states(self) -> dict[str, Any]:
-        return self.memory
+    # ------------------------------------------------------------------
+    # API do cliente (leitura — único ponto de saída)
+    # ------------------------------------------------------------------
 
-    def remove_state(self, player_id: str) -> None:
-        self.memory.pop(player_id, None)
-        self._dr.pop(player_id, None)
+    def get_client_packet(self, cell_size: int = 50) -> ClientPacket:
+        """Servidor chama isso e entrega o resultado ao cliente.
 
-    def clear_memory(self) -> None:
-        self.memory.clear()
-        self._dr.clear()
+        O cliente jamais tem acesso ao StateMemory em si.
+        O ClientPacket é somente-leitura e contém apenas dados autorizados.
+        """
+        entries: dict[str, dict] = {}
+
+        for pid, data in self._state.items():
+            level = data["level"]
+            pos = data["pos"]
+
+            if level == "full":
+                # posição exata + previsão DR para suavização
+                dr_px = self._get_dr_predicted_pos(pid, cell_size)
+                entries[pid] = {
+                    "level": "full",
+                    "pos": pos,
+                    "predicted_px": dr_px,  # pixel coords para lerp no cliente
+                }
+
+            elif level in ("partial", "position_only"):
+                entries[pid] = {"level": level, "pos": pos, "predicted_px": None}
+
+            else:  # none
+                # inclui ghost DR se ainda dentro do grace period
+                dr_px = self._get_dr_predicted_pos(pid, cell_size)
+                entries[pid] = {
+                    "level": "none",
+                    "pos": None,
+                    "predicted_px": dr_px,  # None se expirou
+                }
+
+        return ClientPacket(entries, self._obstacles)

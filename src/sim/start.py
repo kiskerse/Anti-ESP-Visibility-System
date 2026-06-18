@@ -1,144 +1,137 @@
-from typing import Any
+from __future__ import annotations
 
 import os
+import random
 import sys
 import tkinter as tk
+from typing import Any
 
-# Ensure `src` directory is on sys.path so imports like `security` work
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from security.state import StateMemory
-from sim.players import Players
-from sim.game import Game
 from sim.client import Client
-
-
-memory = StateMemory()
+from sim.game import Game
+from sim.players import Players
 
 
 def startGame(
-        config: dict[str, Any], state: dict[str, Any],
-        istate: dict[str, Any]
-        ) -> None:
-
-    # Create the main controller window (for input)
+    config: dict[str, Any],
+    state: dict[str, Any],
+    ai_movement: bool = True,          # ← liga/desliga movimento aleatório dos inimigos
+    ai_move_every_n_ticks: int = 3,    # move inimigos a cada N ticks do servidor (velocidade da IA)
+) -> None:
     root = tk.Tk()
-    root.title("Game Simulation - Server Controller")
+    root.title("Server Controller (WASD para mover | 'r' liga/desliga IA)")
 
-    # Create a Game instance with the initial state and configuration (server view)
-    game = Game(istate=istate, config=config, create_ui=True)
-
-    # generate obstacles once on server and expose them to shared state
+    memory = StateMemory()
+    game = Game(istate={}, config=config, create_ui=True)
     game.draw_random_obstacles()
-    state['obstacles'] = game.obstaculos
-    # precompute rays for all players so server draws rays immediately
-    for pid, pos in state.get('positions', {}).items():
-        try:
-            game.compute_lines_of_sight(pid, pos)
-        except Exception:
-            pass
+    state["obstacles"] = game.obstaculos
+    memory.set_obstacles(game.obstaculos)
 
-    # Create a Player controller
+    for pid, pos in state["positions"].items():
+        game.compute_lines_of_sight(pid, pos)
+
     player = Players()
 
-    # Create a client instance (separate view) that will update StateMemory based on FOV
     client = Client(
         client_id="player1",
-        shared_state=state,
-        memory=memory,
-        fov_deg=90.0,
-        radius=8.0,
-        dir_angle=0.0,
         cell_size=config.get("tamanho_celula", 50),
-        window_size=(600, 600),
+        map_w=state["map_width"],
+        map_h=state["map_height"],
         fps=config.get("client_fps", 60),
     )
 
-    # Bind keyboard events to move the players (affects shared state)
-    root.bind('<KeyPress>', lambda event: (player.move_using_keyboard(event, state, state['map_width'], state['map_height'])))
+    root.bind(
+        "<KeyPress>",
+        lambda e: _handle_key(e, player, state, ai_movement_ref),
+    )
 
-    # Initial draw on server
+    # referência mutável para toggle em runtime
+    ai_movement_ref = {"active": ai_movement}
+
+    def _handle_key(event, pl, st, ai_ref):
+        k = getattr(event, "keysym", None)
+        if k == "r":
+            ai_ref["active"] = not ai_ref["active"]
+            status = "ON" if ai_ref["active"] else "OFF"
+            root.title(f"Server Controller — IA {status}")
+        else:
+            pl.move_using_keyboard(event, st, st["map_width"], st["map_height"])
+
+    root.bind("<KeyPress>", lambda e: _handle_key(e, player, state, ai_movement_ref))
+
     game.draw(state)
 
-    # Periodic redraw to keep server view in sync (target server_fps)
     server_fps = config.get("server_fps", 60)
     server_interval = int(max(1, 1000 / server_fps))
+    tick_counter = [0]
 
     def tick():
+        tick_counter[0] += 1
+
+        # move inimigos com IA a cada N ticks
+        if ai_movement_ref["active"] and tick_counter[0] % ai_move_every_n_ticks == 0:
+            player.move_all_enemies(state)
+
+        # servidor calcula visibilidade → StateMemory → ClientPacket → cliente
         try:
-            # Server computes visibility and pushes info to StateMemory
-            game.update_visibility(state, "player1", memory, fov_deg=90.0, radius=8.0, dir_angle=0.0)
+            game.tick(state, "player1", memory)
+            packet = memory.get_client_packet(config.get("tamanho_celula", 50))
+            client.deliver_packet(packet)
             game.draw(state)
-        except Exception:
-            pass
-        # schedule next tick aiming for server_fps
+        except Exception as e:
+            print(f"[tick error] {e}")
+
         root.after(server_interval, tick)
 
     root.after(200, tick)
-
-    # Start the Tkinter main loop (controller window)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    # Quick test runner: normal-size map and random spawns avoiding obstacles
-    import random
+    map_w, map_h, cell = 20, 20, 50
+    cfg = {
+        "largura":        map_w * cell,
+        "altura":         map_h * cell,
+        "tamanho_celula": cell,
+        "n_rays":         360,
+        "server_fps":     60,
+        "client_fps":     60,
+    }
 
-    map_w = 20
-    map_h = 20
-    cell = 50
-    cfg = {"largura": map_w * cell, "altura": map_h * cell, "tamanho_celula": cell, "n_rays": 180}
+    _game = Game({}, cfg, create_ui=False)
+    _game.draw_random_obstacles()
+    obstacles = _game.obstaculos
 
-    # create initial empty state; obstacles will be generated by the server
-    state = {"map_width": map_w, "map_height": map_h, "positions": {}}
-    istate = {}
-
-    # create game to generate obstacles and then pick spawn points
-    game = Game(istate=istate, config=cfg, create_ui=False)
-    game.draw_random_obstacles()
-    obstacles = game.obstaculos
-
-    def cell_blocked_by_obstacles(x: int, y: int) -> bool:
+    def blocked(x: int, y: int) -> bool:
         for obs in obstacles:
             ox, oy, ow, oh, *_ = obs
             if ox <= x <= ox + ow - 1 and oy <= y <= oy + oh - 1:
                 return True
         return False
 
-    def find_free_cell(occupied: set[tuple[int, int]], max_tries: int = 1000):
-        for _ in range(max_tries):
-            x = random.randint(0, map_w - 1)
-            y = random.randint(0, map_h - 1)
-            if (x, y) in occupied:
-                continue
-            if cell_blocked_by_obstacles(x, y):
-                continue
-            return x, y
-        # fallback: scan grid
-        for iy in range(map_h):
-            for ix in range(map_w):
-                if (ix, iy) in occupied:
-                    continue
-                if cell_blocked_by_obstacles(ix, iy):
-                    continue
-                return ix, iy
-        raise RuntimeError("No free cell available")
+    def free_cell(occupied: set) -> tuple[int, int]:
+        for _ in range(2000):
+            x, y = random.randint(0, map_w - 1), random.randint(0, map_h - 1)
+            if (x, y) not in occupied and not blocked(x, y):
+                return x, y
+        raise RuntimeError("Sem célula livre")
 
     occupied: set[tuple[int, int]] = set()
+    state: dict[str, Any] = {
+        "map_width":  map_w,
+        "map_height": map_h,
+        "positions":  {},
+        "obstacles":  obstacles,
+    }
 
-    # spawn client player
-    px, py = find_free_cell(occupied)
-    occupied.add((px, py))
+    px, py = free_cell(occupied); occupied.add((px, py))
     state["positions"]["player1"] = (px, py, 0)
 
-    # spawn multiple enemies
-    num_enemies = 4
-    for i in range(1, num_enemies + 1):
-        ex, ey = find_free_cell(occupied)
-        occupied.add((ex, ey))
+    for i in range(1, 5):
+        ex, ey = free_cell(occupied); occupied.add((ex, ey))
         state["positions"][f"enemy{i}"] = (ex, ey, 0)
 
-    # expose obstacles to state
-    state["obstacles"] = obstacles
-
-    startGame(cfg, state, istate)
+    # Iniciar com IA ligada — pressione 'r' para alternar
+    startGame(cfg, state, ai_movement=True, ai_move_every_n_ticks=4)
