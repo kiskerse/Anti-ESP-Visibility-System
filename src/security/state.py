@@ -8,11 +8,15 @@ VALID_LEVELS = {"full", "partial", "position_only", "none"}
 class ClientPacket:
     """O que o servidor envia ao cliente por tick — somente-leitura."""
 
-    def __init__(self, entries: dict[str, dict], obstacles: list) -> None:
+    def __init__(
+            self, 
+            entries: dict[str, dict[Any, Any]], 
+            obstacles: list[Any]
+        ) -> None:
         self._entries = entries
         self.obstacles = obstacles
 
-    def get(self, pid: str) -> dict:
+    def get(self, pid: str) -> dict[Any, Any]:
         return self._entries.get(pid, {"level": "none", "pos": None, "predicted_px": None})
 
     def all_pids(self) -> list[str]:
@@ -21,7 +25,7 @@ class ClientPacket:
     def level(self, pid: str) -> str:
         return self._entries.get(pid, {}).get("level", "none")
 
-    def pos(self, pid: str) -> tuple | None:
+    def pos(self, pid: str) -> tuple[float, float] | None:
         return self._entries.get(pid, {}).get("pos", None)
 
 
@@ -35,15 +39,15 @@ class StateMemory:
     DR_CAP_S: float = 0.25
 
     def __init__(self) -> None:
-        self._state: dict[str, dict] = {}
+        self._state: dict[str, dict[Any, Any]] = {}
         # DR: {pid: {pos, vel, ts, jitter_buf: list[float]}}
-        self._dr: dict[str, dict] = {}
-        self._obstacles: list = []
+        self._dr: dict[str, dict[Any, Any]] = {}
+        self._obstacles: list[Any] = []
 
-    def set_obstacles(self, obstacles: list) -> None:
+    def set_obstacles(self, obstacles: list[Any]) -> None:
         self._obstacles = obstacles
 
-    def update(self, pid: str, level: str, pos: tuple | None) -> None:
+    def update(self, pid: str, level: str, pos: tuple[float, float] | None) -> None:
         assert level in VALID_LEVELS, f"Nível inválido: {level}"
         self._state[pid] = {"level": level, "pos": pos}
 
@@ -96,7 +100,7 @@ class StateMemory:
         return (px * cell_size + cell_size / 2, py * cell_size + cell_size / 2)
 
     def get_client_packet(self, cell_size: int = 50) -> "ClientPacket":
-        entries: dict[str, dict] = {}
+        entries: dict[str, dict[str, Any]] = {}
         for pid, data in self._state.items():
             level = data["level"]
             pos   = data["pos"]

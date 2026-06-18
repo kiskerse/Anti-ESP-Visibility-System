@@ -21,7 +21,6 @@ não um substituto. Veja a [análise honesta de limitações](#9-limitações-e-
 8. [Como rodar](#8-como-rodar)
 9. [Limitações e o que este sistema não faz](#9-limitações-e-o-que-este-sistema-não-faz)
 10. [Benchmarks](#10-benchmarks)
-11. [English version](#11-english-version)
 
 ---
 
@@ -35,7 +34,7 @@ onde cada inimigo está.
 O Valorant já tem Fog of War server-autoritativo: o servidor não envia posições de inimigos
 que não estão em linha de visão (LOS). Mas existe uma janela de exploração:
 
-```
+```txt
 Situação sem este sistema:
   Tick N:   inimigo estava visível → cliente guardou pos=(1450, 3200) em memória
   Tick N+1: inimigo saiu do LOS   → servidor não manda nova posição
@@ -50,6 +49,7 @@ Este sistema fecha essa janela.
 ## 2. Como o wallhack funciona
 
 Um ESP wallhack típico:
+
 1. Abre o processo do jogo e lê a memória
 2. Encontra o array de posições dos jogadores
 3. Desenha bonecos coloridos na tela sobre as posições lidas
@@ -65,7 +65,7 @@ A informação crítica é a posição. Se a posição não está na memória, o
 
 O servidor lança 360 raios em todas as direções a partir da sua posição:
 
-```
+```j
         raio →→→→→[PAREDE] ← bloqueado, para aqui
        /
       /
@@ -78,11 +78,12 @@ O servidor lança 360 raios em todas as direções a partir da sua posição:
 Se algum raio chegar até um inimigo sem bater em parede: **inimigo visível → posição exata enviada**.  
 Se todos os raios forem bloqueados: **inimigo não visível → nada enviado**.
 
-Não há gradação por distância. É o mesmo modelo do Valorant: você vê ou não vê.
+> [!NOTE]
+> Não há gradação por distância. É o mesmo modelo do Valorant: você vê ou não vê.
 
 ### O que fica na memória do cliente
 
-```
+```j
 ┌────────────────────────────────────────────────────────────┐
 │  MEMÓRIA DO CLIENTE (ClientPacket)                         │
 │                                                            │
@@ -94,6 +95,7 @@ Não há gradação por distância. É o mesmo modelo do Valorant: você vê ou 
 ```
 
 Um cheat que lê essa memória:
+
 - Para inimigos visíveis: vê a posição — mas o cliente legítimo também vê, então **zero vantagem**
 - Para inimigos não visíveis: não encontra nada — **zero vantagem**
 - Para ghost DR: encontra posição extrapolada imprecisa que expira em 250ms — **vantagem mínima**
@@ -101,7 +103,7 @@ Um cheat que lê essa memória:
 ### Resultados da simulação do ESP
 
 | Situação | Inimigos extras via cheat (sem proteção) | Com proteção |
-|---|---|---|
+| --- | --- | --- |
 | Jogo sem este sistema | +7 de 8 inimigos revelados | — |
 | Com proteção, player no centro | +3.2 em média | **60% de redução** |
 | Com proteção, mapa denso (40 obstáculos) | +1.5 em média | **~80% de redução** |
@@ -119,7 +121,7 @@ voltasse ao LOS, ele "teleportaria" para a nova posição. Isso é pop-in.
 
 ### A solução: três camadas
 
-```
+```j
 Camada 1 — Lerp adaptativo:
   Quando o inimigo está visível, o cliente suaviza a posição entre ticks.
   Quanto mais longe do alvo, mais rápido o lerp (evita lag perceptível).
@@ -137,28 +139,32 @@ Camada 3 — Fade out:
   o boneco por 8 frames antes de sumir. Nunca desaparece abruptamente.
 ```
 
-**Segurança do DR:** o ghost usa apenas dados que o cliente já recebeu legitimamente.
-O cheat que lê a memória do ghost vê apenas a última posição autorizada + extrapolação
-de velocidade — não há informação nova.
+> [!IMPORTANT]
+> O ghost usa apenas dados que o cliente já recebeu legitimamente. O cheat que lê a memória do ghost vê apenas a última posição autorizada + extrapolação de velocidade — não há informação nova.
 
 ---
 
 ## 5. Fórmula de delay total
 
-```
-DelayTotal = (Ping / 2) + TickCompensação + JitterCompensação + MargemSegurança
-```
+$$
+D_T = \left(\frac{P}{2}\right) + T_c + J_c + M_s
+$$
 
-| Componente | Valor típico | Significado |
-|---|---|---|
-| Ping / 2 | 15ms (SP) a 130ms (Sydney) | One-way delay ao servidor |
-| TickCompensação | 16.67ms | Janela de um tick @ 60 TPS |
-| JitterCompensação | ~0.1–1.0ms | Variação entre ticks consecutivos |
-| MargemSegurança | 10ms fixo | Buffer para picos de latência |
-| **DelayTotal** | **~42ms (SP) a ~158ms (Sydney)** | Janela máxima de incerteza |
+- $D_T$ - Delay total
+- $P$ - Ping (em `ms`)
+- $T_c$ - Compensação do Tick
+- $J_c$ - Compensação do Jitter
+- $M_s$ - Margem de Segurança
 
-O DR precisa cobrir apenas o DelayTotal para garantir zero pop-in.
-Com cap de 250ms, o sistema cobre todos os cenários testados com folga.
+| Componente | Fórmula | Descrição |
+| --- | --- | --- |
+| `Ping / 2` | RTT / 2 | One-way delay ao servidor (metade do RTT) |
+| `Compensação do Tick` | 1000 / server_fps | Janela de um tick completo (16.67ms @ 60 TPS) |
+| `Compensação do Jitter` | std_dev(inter-tick intervals) | Variação estatística entre ticks consecutivos |
+| `Margem de Segurança` | 10ms fixo | Buffer conservador para picos de latência |
+
+> [!NOTE]
+> O DR precisa cobrir apenas o $D_T$ para garantir zero pop-in. Com cap de 250ms, o sistema cobre todos os cenários testados com folga.
 
 ---
 
@@ -167,24 +173,27 @@ Com cap de 250ms, o sistema cobre todos os cenários testados com folga.
 O módulo `wallhack_esp.py` abre **duas janelas extras** durante a simulação:
 
 **Janela 3 — ESP protegido** (verde no título):
+
 - Simula um cheat lendo o `ClientPacket` filtrado
 - Só vê o que o cliente legítimo já vê
 - Mostra: bonecos laranjas (visíveis) + ghosts DR tracejados (imprecisos)
 - Vantagem medida: **zero extras**
 
 **Janela 4 — ESP desprotegido** (vermelho no título):
+
 - Simula um cheat lendo o `state` bruto sem proteção
 - Vê todos os inimigos independentemente de obstáculos
 - Bonecos **vermelhos** = inimigos que o cheat revela ilegitimamente
 - Label "ESP!" aparece sobre cada inimigo extra
 
-O HUD exibe em tempo real: vantagem atual, média e % de ticks com vantagem.
+> [!TIP]
+> O HUD exibe em tempo real: vantagem atual, média e % de ticks com vantagem.
 
 ---
 
 ## 7. Arquitetura
 
-```
+```js
 src/
 ├── security/
 │   └── state.py              ← StateMemory + ClientPacket (filtro servidor→cliente)
@@ -200,7 +209,7 @@ src/
 
 ### Fluxo de dados (seguro)
 
-```
+```js
   ┌──────────────────────────────────────────┐
   │  Servidor (game.py)                       │
   │  raycasting → classifica → StateMemory   │
@@ -235,16 +244,19 @@ src/
 python src/sim/start.py
 ```
 
-Quatro janelas abrem simultaneamente:
-1. **Servidor** — visão omnisciente com raios de raycasting
-2. **Cliente legítimo** — só o que foi autorizado
-3. **ESP protegido** — cheat lendo ClientPacket (sem vantagem)
-4. **ESP desprotegido** — cheat lendo tudo (vantagem em vermelho)
+> [!NOTE]
+> Quatro janelas abrem:
+> 1. Servidor (omnisciente, com raios)
+> 2. Cliente legítimo (só o que o servidor autorizou)
+> 3. ESP protegido (cheat lendo ClientPacket — sem vantagem)
+> 4. ESP desprotegido (cheat lendo state bruto — com vantagem em vermelho)
+> 5. O controlador do simulador. Você deve deixar aberta com foco, assim, locomovendo apertando, nessa janela, WASD.
 
-**Controles** (janela do Servidor):
-- `W A S D` — mover player1
-- `R` — ligar/desligar IA dos inimigos
-- `H` — ligar/desligar janelas ESP
+> [!TIP]
+> **Controles** (janela do Controlador):
+> - `W A S D` — mover player1
+> - `R` — ligar/desligar IA dos inimigos
+> - `H` — ligar/desligar janelas ESP
 
 ### Benchmark
 
@@ -282,114 +294,7 @@ Isso é aceitável — a posição é extrapolada e não utilizável para aim as
 Ver `REPORT.md` para resultados completos. Resumo:
 
 | Cenário | Compute (SP) | Overhead | WH Redução | DR Coverage | Delay Total (SP) |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | n_rays=360, 25 obs | ~0.57ms | ~3.4% | ~60% | 100% | ~42ms |
 | n_rays=720, 25 obs | ~0.87ms | ~5.2% | ~60% | 100% | ~42ms |
 | n_rays=360, 40 obs | ~0.88ms | ~5.3% | ~75-85% | 100% | ~42ms |
-
----
-
----
-
-## 11. English version
-
-# Anti-Wallhack — Fog of War with Dead-Reckoning
-
-> This system **minimizes** (does not eliminate) wallhack advantage in Valorant by
-> protecting client memory from enemy positions outside line-of-sight, without
-> introducing visual pop-in or meaningful server overhead.
-
-**Read first:** this is a complementary defense layer alongside Vanguard, not a replacement.
-
----
-
-### How it works — plain English
-
-A wallhack ESP cheat reads game memory to find all player positions, even enemies behind
-walls. It draws colored player outlines without showing the map — classic "Extra Sensory
-Perception" cheat.
-
-The existing Valorant FoW already hides non-visible enemies. The gap: the client often
-caches the last-known position in memory. The cheat reads that stale position.
-
-**This system closes that gap in two ways:**
-
-**1 — Server-authoritative LOS (Valorant-style)**
-
-The server casts 360 rays per player per tick. If any ray reaches an enemy unobstructed:
-enemy is visible → exact position sent. Otherwise: nothing sent.
-
-No distance-based zones. No partial information. Binary: visible → exact pos, hidden → nothing.
-
-**2 — Dead-reckoning to prevent pop-in**
-
-When an enemy leaves LOS, the server estimates their likely position using velocity from
-the last two confirmed updates. The client receives a faded "ghost" at the predicted
-position for up to 250ms. Three layers prevent abrupt disappearance:
-- Adaptive lerp (smooths toward predicted position)
-- DR ghost (extrapolated position, 250ms cap)
-- Fade-out (8-frame gradual darkening when DR expires)
-
-The ghost only contains data the client already legitimately received — no new information.
-
----
-
-### Total delay formula
-
-```
-DelayTotal = (Ping / 2) + TickCompensation + JitterCompensation + SafetyMargin
-```
-
-| Region | DelayTotal |
-|---|---|
-| São Paulo (30ms) | ~42ms |
-| Manaus (120ms) | ~87ms |
-| London (180ms) | ~117ms |
-| Sydney (260ms) | ~158ms |
-
----
-
-### Wallhack advantage — measured results
-
-| Scenario | Enemies revealed by cheat | Advantage reduction |
-|---|---|---|
-| No protection (baseline) | 7–8 of 8 | — |
-| Protected, player center, 25 obstacles | ~3.2 avg | **~60%** |
-| Protected, dense map (40 obstacles) | ~1.5 avg | **~80%** |
-| Protected, all in LOS | 0 extras | 100% (no cheat advantage either way) |
-
----
-
-### Architecture
-
-```
-Server (game.py) → StateMemory → ClientPacket (read-only, filtered) → Client
-                                                                    ↘ ESP protected (same data)
-                                                                    ↘ ESP unprotected (raw state — cheat sim)
-```
-
-The client never accesses StateMemory directly. It only receives `ClientPacket`
-via `deliver_packet()`. The raw state never leaves the server.
-
----
-
-### How to run
-
-```bash
-# Full simulation with ESP windows
-python src/sim/start.py
-
-# Benchmark (all regions, wallhack metrics)
-python src/sim/run_benchmark_comparison.py
-```
-
-Controls: `W A S D` to move, `R` to toggle AI, `H` to toggle ESP windows.
-
----
-
-### Honest limitations
-
-- Does not detect cheaters (Vanguard does that)
-- Does not protect visible enemies (they should be visible — no marginal advantage)
-- More effective on dense maps with lots of cover — exactly Valorant's map design
-- Not production-ready: StateMemory is an in-process dict; needs network serialization

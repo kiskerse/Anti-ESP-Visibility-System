@@ -24,7 +24,6 @@ Métricas de vantagem do wallhack:
 
 from __future__ import annotations
 
-import math
 import random
 import statistics
 import time
