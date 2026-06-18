@@ -78,6 +78,8 @@ não introduz variância de processamento significativa neste protótipo Python.
 
 ### 3.1 CPU
 
+<video src="https://raw.githubusercontent.com/kiskerse/Valorant-Anti-ESP/master/docs/videos/demo-server-view.mp4"></video>
+
 O raycasting é puramente sequencial e executado na thread do servidor a cada tick.
 
 | Cenário | Compute puro | CPU do processo | Observação |
@@ -110,7 +112,7 @@ Em produção no Valorant:
 
 ## 4. Simulação do Wallhack ESP
 
-<video src="https://raw.githubusercontent.com/kiskerse/Valorant-Anti-ESP/main/docs/video/demo-client+wallhack.mp4"></video>
+<video src="https://raw.githubusercontent.com/kiskerse/Valorant-Anti-ESP/master/docs/videos/demo-client+wallhack-view.mp4"></video>
 
 ### 4.1 O que foi simulado
 
