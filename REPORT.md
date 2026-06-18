@@ -78,7 +78,9 @@ não introduz variância de processamento significativa neste protótipo Python.
 
 ### 3.1 CPU
 
-![](/docs/videos/demo-server-view.mp4)
+<video controls> 
+  <source src="/docs/videos/demo-server-view.mp4" type="video/mp4">
+</video>
 
 O raycasting é puramente sequencial e executado na thread do servidor a cada tick.
 
