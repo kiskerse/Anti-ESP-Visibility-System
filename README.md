@@ -211,7 +211,7 @@ src/
 
 ```js
   ┌──────────────────────────────────────────┐
-  │  Servidor (game.py)                       │
+  │  Servidor (game.py)                      │
   │  raycasting → classifica → StateMemory   │
   └──────────────────┬───────────────────────┘
                      │  get_client_packet()
