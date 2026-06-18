@@ -76,9 +76,10 @@ não introduz variância de processamento significativa neste protótipo Python.
 
 ## 3. Uso de CPU e GPU
 
+[![Watch the video](https://img.youtube.com/vi/HVZZQFaUx_E/hqdefault.jpg)](https://www.youtube.com/embed/HVZZQFaUx_E)
+
 ### 3.1 CPU
 
-![video](/docs/videos/demo-server-view.mp4)
 
 O raycasting é puramente sequencial e executado na thread do servidor a cada tick.
 
@@ -112,7 +113,7 @@ Em produção no Valorant:
 
 ## 4. Simulação do Wallhack ESP
 
-![](/docs/videos/demo-client+wallhack-view.mp4)
+[![Watch the video](https://img.youtube.com/vi/WgowtZMCr2s/hqdefault.jpg)](https://www.youtube.com/embed/WgowtZMCr2s)
 
 ### 4.1 O que foi simulado
 
