@@ -9,17 +9,6 @@ from security.state import StateMemory
 
 
 class Game:
-    """Servidor — única fonte de verdade.
-
-    Modelo de visibilidade (inspirado em Valorant):
-    - Se o inimigo está na linha de visão (qualquer distância) → posição EXATA
-    - Se não está → NADA (none)
-
-    Não existe zona "partial" baseada em distância.
-    A distância só afeta se o raycasting detecta o alvo, não o que é revelado.
-    O dead-reckoning no StateMemory cuida de suavizar saídas do FOV (anti pop-in).
-    """
-
     def __init__(
         self,
         istate: dict[str, Any],
@@ -51,9 +40,7 @@ class Game:
         self.obstacles_version = 0
         self.last_obstacles_version = 0
 
-    # ------------------------------------------------------------------
     # Obstáculos
-    # ------------------------------------------------------------------
 
     def _generate_obstacle(self) -> tuple:
         cols = self.largura // self.tamanho_celula
@@ -91,9 +78,7 @@ class Game:
                 return True
         return False
 
-    # ------------------------------------------------------------------
     # Raycasting
-    # ------------------------------------------------------------------
 
     def compute_lines_of_sight(self, pid: str, pos: tuple) -> None:
         max_dist = max(self.largura, self.altura)
@@ -127,14 +112,11 @@ class Game:
         for ox, oy, hx, hy in self.lines_of_sight_by_player.get(str(pid), []):
             self.canvas.create_line(ox, oy, hx, hy, fill="#330000", width=1)
 
-    # ------------------------------------------------------------------
-    # Visibilidade — lógica Valorant-like
-    # ------------------------------------------------------------------
-
+    # Visibilidade
     def _is_visible(self, rays: list, px: float, py: float) -> bool:
         """Verifica se o ponto (px, py) é coberto por algum raio.
 
-        Threshold menor que o antigo para evitar falsos positivos
+        Threshold menor para evitar falsos positivos
         atrás de paredes finas.
         """
         thresh = (self.tamanho_celula * 0.45) ** 2
@@ -152,21 +134,19 @@ class Game:
                 return True
         return False
 
-    # ------------------------------------------------------------------
     # Tick do servidor
-    # ------------------------------------------------------------------
 
     def tick(
         self,
         state: dict[str, Any],
         client_id: str,
         memory: StateMemory,
-        radius: float = 999.0,   # sem limite de distância por padrão (Valorant-like)
+        radius: float = 999.0,   # sem limite de distância por padrão
     ) -> None:
         """Executa um tick:
-        1. Recomputa raios se o jogador moveu
+        1. Renova raios se o jogador moveu
         2. Classifica cada inimigo: visível → full exato | não visível → none
-        3. Escreve na StateMemory (cliente nunca toca aqui)
+        3. Escreve na StateMemory
         """
         positions = state.get("positions", {})
         client_pos = positions.get(client_id)
@@ -193,17 +173,15 @@ class Game:
             py = y * self.tamanho_celula + self.tamanho_celula / 2
 
             if self._is_visible(rays, px, py):
-                # VISÍVEL → posição exata, sem gradação por distância
+                # VISÍVEL → posição exata
                 memory.update(pid, "full", (x, y, z))
             else:
-                # NÃO VISÍVEL → nada (DR cuida do anti pop-in)
+                # NÃO VISÍVEL → nada (DR cuida do pop-in, se necessário)
                 memory.update(pid, "none", None)
 
         memory.set_obstacles(self.obstaculos)
 
-    # ------------------------------------------------------------------
     # Desenho servidor (omnisciente)
-    # ------------------------------------------------------------------
 
     def draw(self, state: dict[str, Any]) -> None:
         if not self.canvas or not self.root:

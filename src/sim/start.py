@@ -107,8 +107,6 @@ def startGame(
     root.after(200, tick)
     root.mainloop()
 
-
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     # Mapa maior e mais realista (40×40, mais obstáculos)
     map_w, map_h, cell = 40, 40, 30

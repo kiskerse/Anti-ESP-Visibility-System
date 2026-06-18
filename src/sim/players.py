@@ -35,9 +35,7 @@ class Players:
             return True
         return False
 
-    # ------------------------------------------------------------------
     # Controle humano
-    # ------------------------------------------------------------------
 
     def move_using_keyboard(
         self,
@@ -57,9 +55,7 @@ class Players:
         elif k == "d":
             self._try_move(state, player_id, 1, 0)
 
-    # ------------------------------------------------------------------
     # Movimento aleatório de IA (respeita obstáculos)
-    # ------------------------------------------------------------------
 
     def __init__(self) -> None:
         # estado interno de cada IA: direção atual e contador de passos
@@ -67,17 +63,17 @@ class Players:
         self._ai_steps: dict[str, int] = {}
 
     def move_ai_random(self, state: dict[str, Any], pid: str) -> None:
-        """Move um inimigo com IA aleatória estilo "random walk com inércia".
+        """Move um inimigo com IA.
 
         A IA mantém a direção atual por alguns passos antes de sortear
-        uma nova — isso produz movimento mais natural (menos jitter) e
+        uma nova -> Movimento mais natural (menos jitter) e
         facilita a observação do pop-in e dead-reckoning.
         """
         steps_left = self._ai_steps.get(pid, 0)
         current_dir = self._ai_dir.get(pid, random.choice(self._DIRS))
 
         if steps_left <= 0 or not self._try_move(state, pid, *current_dir):
-            # escolhe nova direção aleatória (embaralha para não ter viés)
+            # escolhe nova direção aleatória (embaralha a lista para não favorecer nenhuma direção)
             dirs = self._DIRS[:]
             random.shuffle(dirs)
             moved = False

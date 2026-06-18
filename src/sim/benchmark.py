@@ -1,10 +1,10 @@
 """
-Benchmark de impacto competitivo — Anti-Wallhack com DR.
+Benchmark.
 
 Fórmula de delay total (por tick):
   DelayTotal = (Ping / 2) + TickCompensação + JitterCompensação + MargemSegurança
 
-  onde:
+  explicação de cada termo:
     Ping / 2             = metade do RTT (one-way delay ao servidor)
     TickCompensação      = 1000 / server_fps  (janela de um tick)
     JitterCompensação    = std_dev dos inter-tick intervals (últimos 8 ticks)
@@ -35,9 +35,7 @@ from sim.game import Game
 from security.state import StateMemory
 
 
-# ---------------------------------------------------------------------------
 # Regiões
-# ---------------------------------------------------------------------------
 
 REGIONS_BRAZIL: dict[str, int] = {
     "São Paulo":      30,
@@ -63,10 +61,7 @@ ALL_REGIONS = {**REGIONS_BRAZIL, **REGIONS_LATAM, **REGIONS_GLOBAL}
 
 MARGIN_SAFETY_MS = 10.0   # MargemSegurança fixa
 
-
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _jitter_compensation(inter_tick_ms: list[float]) -> float:
     """Desvio padrão dos inter-tick intervals — estimativa de jitter."""
@@ -126,10 +121,7 @@ def _count_wallhack_advantage(state: dict, packet) -> int:
     all_enemies = {pid for pid in state["positions"] if str(pid).startswith("enemy")}
     return len(all_enemies - legit_visible)
 
-
-# ---------------------------------------------------------------------------
 # Runner principal
-# ---------------------------------------------------------------------------
 
 def run_benchmark(
     state: dict[str, Any],
@@ -250,7 +242,7 @@ def run_benchmark(
             "budget_ok":         avg_compute <= budget_ms,
             "overhead_pct":      round(avg_compute / budget_ms * 100, 2),
             "cpu_pct":           round(avg_cpu, 1),
-            "gpu_util":          0.0,   # Tkinter/Canvas = renderização CPU; GPU não utilizada
+            "gpu_util":          0.0,   # Tkinter/Canvas = renderização CPU. GPU não é usada
             "gpu_note":          "Canvas 2D via CPU — GPU não utilizada neste protótipo",
             "popin_events":      popin_events,
             "dr_coverage_pct":   round(dr_cov_pct, 1),

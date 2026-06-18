@@ -53,16 +53,12 @@ class Client:
         self._interval = int(max(1, 1000 / fps))
         self._loop()
 
-    # ------------------------------------------------------------------
-    # Interface pública — servidor chama isso
-    # ------------------------------------------------------------------
+    # Interface pública
 
     def deliver_packet(self, packet: "ClientPacket") -> None:
         self._packet = packet
 
-    # ------------------------------------------------------------------
     # Renderização
-    # ------------------------------------------------------------------
 
     def _lerp(self, cur: tuple[float, float], target: tuple[float, float], t: float) -> tuple[float, float]:
         return (cur[0] + (target[0] - cur[0]) * t, cur[1] + (target[1] - cur[1]) * t)

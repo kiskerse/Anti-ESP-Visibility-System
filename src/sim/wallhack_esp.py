@@ -1,5 +1,5 @@
 """
-Wallhack ESP — simulação de cheat para medir a vantagem real.
+Wallhack ESP, simulação de cheat para medir a vantagem real.
 
 O que este módulo simula:
 - Um cheat que lê diretamente o state bruto do servidor (como seria sem proteção)
@@ -10,8 +10,6 @@ O que este módulo simula:
 Com o sistema anti-wallhack ativo:
 - O cheat leria apenas o ClientPacket (que já é filtrado)
 - Então a "vantagem" cai drasticamente: só vê quem você já veria normalmente
-
-Esta janela serve como prova visual e métrica quantitativa da redução de vantagem.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ class WallhackESP:
         Lê o state bruto do servidor — simula um jogo sem este sistema.
         Mostra todos os inimigos independentemente de obstáculos.
 
-    A diferença entre os dois modos é a "vantagem wallhack" medida.
+    A diferença entre os dois modos é a vantagem medida.
     """
 
     def __init__(
@@ -60,7 +58,7 @@ class WallhackESP:
         self.ticks_with_advantage = 0
 
         self.root = tk.Toplevel()
-        mode_str = "SEM proteção (cheat vê tudo)" if sem_protecao else "COM proteção (cheat filtrado)"
+        mode_str = "SEM proteção (cheat enxerga tudo)" if sem_protecao else "COM proteção (cheat filtrado)"
         self.root.title(f"Wallhack ESP — {mode_str}")
         self.root.configure(bg="#0a0a0a")
 
@@ -73,9 +71,7 @@ class WallhackESP:
         self._interval = int(max(1, 1000 / fps))
         self._loop()
 
-    # ------------------------------------------------------------------
     # API pública
-    # ------------------------------------------------------------------
 
     def deliver_packet(self, packet: "ClientPacket") -> None:
         """Alimenta o ESP com dados do modo PROTEGIDO (ClientPacket filtrado)."""
@@ -83,14 +79,12 @@ class WallhackESP:
 
     def deliver_raw_state(self, state: dict[str, Any], visible_by_legit: set[str]) -> None:
         """Alimenta o ESP com state bruto (modo DESPROTEGIDO).
-        visible_by_legit: pids que o cliente legítimo já vê (para calcular vantagem).
+        visible_by_legit: pids que o cliente legítimo já visualiza (para calcular vantagem).
         """
         self._raw_state = state
         self._visible_legit = visible_by_legit
 
-    # ------------------------------------------------------------------
     # Renderização
-    # ------------------------------------------------------------------
 
     def _draw(self) -> None:
         self.canvas.delete("all")
@@ -131,7 +125,7 @@ class WallhackESP:
                 if level == "full" and pos is not None:
                     px = pos[0] * cs + cs / 2
                     py = pos[1] * cs + cs / 2
-                    # laranja = visível pelo sistema legítimo também — sem vantagem
+                    # laranja = visível pelo sistema legítimo também — sem vantagem aparente
                     self.canvas.create_oval(px - r, py - r, px + r, py + r,
                                             fill="#ff8800", outline="#ffaa00", width=2)
                 elif level == "none" and dr_px is not None:
@@ -142,7 +136,7 @@ class WallhackESP:
                                             width=1, dash=(2, 3))
                     self.canvas.create_text(dpx, dpy - r - 6, text="~DR", fill="#886600",
                                             font=("Courier", 7))
-            advantage = 0  # com proteção, cheat não vê nada a mais
+            advantage = 0  # com proteção, cheat não lê nada a mais
 
         # métricas
         self.total_ticks += 1
