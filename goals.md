@@ -28,4 +28,4 @@ Essa seção é uma anotação para que eu possa verificar se a solução pensad
 
 5. 🟠 - Pode ser que sim, nesse simulador não pareceu que vá piorar (0)
 
-Resultado final: $ 2/5 $ ( $ 40\% $ ) bom
+Resultado final: $2/5$ ( $40\%$ ) bom
