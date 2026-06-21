@@ -26,7 +26,7 @@ O escopo deste protótipo restringe-se a validar se a implementação conjunta d
 3. ESP Protegido
 4. ESP Desprotegido
 
-![Demo](/docs/demo_antiwallhack.mp4)
+![Demo](/docs/demo_antiwallhack.webp)
 
 **Diretrizes de observação da demonstração:**
 

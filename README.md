@@ -20,7 +20,7 @@ Uma solução completa para wallhack. O vetor que este protótipo fecha é leitu
 
 ## Demonstração
 
-![Demo](/docs/demo_antiwallhack.mp4)
+![Demo](/docs/demo_antiwallhack.webp)
 
 Quatro painéis:
 
