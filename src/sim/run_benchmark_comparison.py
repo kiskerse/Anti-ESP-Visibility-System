@@ -1,4 +1,6 @@
-"""Runner completo — gera JSON, CSV e tabelas de impacto competitivo."""
+"""
+Runner completo — 128 TPS, entry masking, adaptive DR, regiões globais.
+"""
 from __future__ import annotations
 
 import copy, csv, json, os, sys, types
@@ -8,107 +10,120 @@ class _S:
     def __init__(self,*a,**k): pass
     def __call__(self,*a,**k): return self
     def __getattr__(self,n): return self
-for _a in ["Tk","Toplevel","Canvas","Event","Frame","Label","Button"]:
+for _a in ["Tk","Toplevel","Canvas","Event","Frame"]:
     setattr(tk_stub, _a, _S)
 sys.modules.setdefault("tkinter", tk_stub)
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from sim.benchmark import (
-    run_benchmark,
-    REGIONS_BRAZIL, REGIONS_LATAM, REGIONS_GLOBAL, ALL_REGIONS,
-)
+from security.pvs  import load_or_build
+from sim.benchmark import run_benchmark, REGIONS_BRAZIL, REGIONS_LATAM, REGIONS_GLOBAL, ALL_REGIONS, TARGET_TPS, TICK_BUDGET
+from sim.map_gen   import generate_map, spawn_players
 
 OUT     = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-MAP_W   = 40
-MAP_H   = 40
-CELL    = 30
-N_ENEMIES = 8
-
-BASE_STATE = {
-    "map_width":  MAP_W,
-    "map_height": MAP_H,
-    "positions": {
-        "player1": (2,  20, 0),
-        **{f"enemy{i}": (MAP_W - 3 - (i % 5) * 6, 5 + i * 4, 0) for i in range(1, N_ENEMIES + 1)},
-    },
-}
-
-def cfg(n_rays: int) -> dict:
-    return {"largura": MAP_W*CELL, "altura": MAP_H*CELL,
-            "tamanho_celula": CELL, "n_rays": n_rays}
+MAP_W   = 60
+MAP_H   = 60
+N_OBS   = 45
+SEED    = 42
+CACHE   = os.path.join(OUT, "pvs_cache_60x60_s42.pkl.gz")
 
 
-def save(name: str, c: dict, res: dict, ticks: int) -> None:
+def save(name: str, res: dict, ticks: int) -> None:
+    cols = [
+        "region","ping_ms","compute_ms","achieved_tps","target_tps",
+        "tick_budget_ms","overhead_pct","missed_ticks","missed_pct",
+        "jitter_ms","cpu_pct","gpu_pct",
+        "dr_cap_ms","dr_ghost_reduction_pct",
+        "entry_mask_ticks","entry_mask_pct","info_delay_ms",
+        "wh_advantage_avg","wh_advantage_pct","wh_reduction_pct",
+        "delay_total_ms","ping_half_ms","tick_comp_ms","margin_ms",
+    ]
     with open(f"{OUT}/benchmark_{name}.json", "w", encoding="utf-8") as f:
-        json.dump({"scenario": name, "config": c, "ticks": ticks, "results": res}, f, indent=2, ensure_ascii=False)
-    cols = ["region","ping_ms","compute_ms","avg_tick_ms","p95_tick_ms","tps",
-            "budget_ok","overhead_pct","cpu_pct","gpu_util",
-            "popin_events","dr_coverage_pct","dr_gap_ms",
-            "wh_advantage_avg","wh_advantage_pct","wh_reduction_pct",
-            "delay_total_ms","ping_half_ms","tick_comp_ms","jitter_comp_ms","margin_ms"]
+        json.dump({"scenario": name, "ticks": ticks, "target_tps": TARGET_TPS,
+                   "tick_budget_ms": TICK_BUDGET, "results": res}, f, indent=2, ensure_ascii=False)
     with open(f"{OUT}/benchmark_{name}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
-        for r, d in res.items():
-            w.writerow({"region": r, **d})
+        for region, d in res.items():
+            w.writerow({"region": region, **d})
 
 
 def print_table(name: str, res: dict) -> None:
-    print(f"\n{'='*120}")
-    print(f"  Cenário: {name}")
-    print(f"{'='*120}")
-    hdr = f"  {'Região':<20} {'Ping':>5} {'Compute':>9} {'CPU%':>5} {'GPU%':>5} {'TPS':>6} {'Budget':>7} {'WH Adv':>7} {'WH Red%':>8} {'DR Cov':>7} {'DelayTotal':>11}"
+    print(f"\n{'='*115}")
+    print(f"  Cenário: {name}  (target={TARGET_TPS} TPS, budget={TICK_BUDGET:.4f}ms)")
+    print(f"{'='*115}")
+    hdr = (f"  {'Região':<20} {'Ping':>5} {'Compute':>9} {'Ovhd':>6} "
+           f"{'Miss%':>6} {'DR cap':>7} {'DR-Red':>7} "
+           f"{'InfoDly':>8} {'WH Red':>7} {'DelayTot':>10}")
     print(hdr)
-    print(f"  {'-'*114}")
+    print(f"  {'-'*109}")
     for region, v in res.items():
-        ok = "✓" if v["budget_ok"] else "✗"
+        ok = "✓" if v["missed_pct"] == 0 else f"✗{v['missed_pct']:.0f}%"
         print(
             f"  {region:<20} {v['ping_ms']:>4}ms"
-            f" {v['compute_ms']:>8.3f}ms"
-            f" {v['cpu_pct']:>4.1f}%"
-            f" {v['gpu_util']:>4.1f}%"
-            f" {v['tps']:>5.1f}"
-            f" {ok:>7}"
-            f" {v['wh_advantage_avg']:>6.2f}"
-            f" {v['wh_reduction_pct']:>7.1f}%"
-            f" {v['dr_coverage_pct']:>6.1f}%"
-            f" {v['delay_total_ms']:>10.2f}ms"
+            f" {v['compute_ms']:>8.4f}ms"
+            f" {v['overhead_pct']:>5.2f}%"
+            f" {ok:>6}"
+            f" {v['dr_cap_ms']:>6.0f}ms"
+            f" {v['dr_ghost_reduction_pct']:>6.0f}%"
+            f" {v['info_delay_ms']:>7.2f}ms"
+            f" {v['wh_reduction_pct']:>6.0f}%"
+            f" {v['delay_total_ms']:>9.2f}ms"
         )
 
 
 SCENARIOS = [
-    ("realista_brasil",  360, REGIONS_BRAZIL, 20, True,  25),
-    ("realista_global",  360, ALL_REGIONS,    15, True,  25),
-    ("hires_brasil",     720, REGIONS_BRAZIL, 15, True,  25),
-    ("denso_brasil",     360, REGIONS_BRAZIL, 15, True,  40),   # 40 obstáculos
+    ("brasil_128tps",  REGIONS_BRAZIL, 25),
+    ("latam_128tps",   REGIONS_LATAM,  20),
+    ("global_128tps",  ALL_REGIONS,    15),
 ]
 
 if __name__ == "__main__":
-    all_res: dict[str, dict] = {}
+    print("[MAP] Gerando mapa 60×60...")
+    obstacles, solid = generate_map(MAP_W, MAP_H, N_OBS, seed=SEED)
+    positions, teams = spawn_players(MAP_W, MAP_H, solid, 5, 5)
 
-    for name, n_rays, regions, ticks, move, n_obs in SCENARIOS:
-        c = cfg(n_rays)
-        print(f"\nRunning [{name}]  n_rays={n_rays}  obstacles={n_obs}  ticks={ticks}  regiões={len(regions)} ...")
-        res = run_benchmark(copy.deepcopy(BASE_STATE), c, regions,
-                            ticks=ticks, move_enemies=move, n_obstacles=n_obs)
-        all_res[name] = res
+    pvs_idx = load_or_build(MAP_W, MAP_H, obstacles, CACHE)
+    print(f"[PVS] Stats: {pvs_idx.stats()}")
+
+    all_results: dict[str, dict] = {}
+    for name, regions, ticks in SCENARIOS:
+        print(f"\nRunning [{name}]  ticks={ticks}  regiões={len(regions)} ...")
+        res = run_benchmark(pvs_idx, obstacles, solid, positions, teams,
+                            regions=regions, ticks=ticks, map_w=MAP_W, map_h=MAP_H)
+        all_results[name] = res
         print_table(name, res)
-        save(name, c, res, ticks)
+        save(name, res, ticks)
 
-    # resumo de vantagem wallhack
-    print(f"\n{'='*120}")
-    print("  RESUMO: Vantagem do Wallhack — São Paulo (com proteção ativa)")
-    print(f"{'='*120}")
-    for name in SCENARIOS:
-        nm = name[0]
-        sp = all_res[nm].get("São Paulo", {})
-        if sp:
-            print(f"  [{nm:<22}] WH vantagem média: {sp['wh_advantage_avg']:.2f} inimigos "
-                  f"| Redução: {sp['wh_reduction_pct']:.1f}% "
-                  f"| Delay total: {sp['delay_total_ms']:.1f}ms "
-                  f"| Jitter comp: {sp['jitter_comp_ms']:.2f}ms")
+    # resumo executivo
+    print(f"\n{'='*115}")
+    print(f"  RESUMO EXECUTIVO — Contenção de Informação @ {TARGET_TPS} TPS")
+    print(f"{'='*115}")
+    print(f"  {'Métrica':<40} {'SP (30ms)':>12} {'Manaus (120ms)':>15} {'Sydney (260ms)':>15}")
+    print(f"  {'-'*85}")
+    for label, city in [("Compute por tick", "São Paulo"),
+                         ("Overhead do budget", "São Paulo"),
+                         ("DR cap adaptativo", "São Paulo"),
+                         ("Redução de ghost DR vs 250ms", "São Paulo"),
+                         ("Info delay (entry masking)", "São Paulo"),
+                         ("Delay total", "São Paulo")]:
+        row_br = all_results["brasil_128tps"].get("São Paulo", {})
+        row_ma = all_results["brasil_128tps"].get("Manaus", {})
+        row_sy = all_results["global_128tps"].get("Sydney", {})
+        key_map = {
+            "Compute por tick": "compute_ms",
+            "Overhead do budget": "overhead_pct",
+            "DR cap adaptativo": "dr_cap_ms",
+            "Redução de ghost DR vs 250ms": "dr_ghost_reduction_pct",
+            "Info delay (entry masking)": "info_delay_ms",
+            "Delay total": "delay_total_ms",
+        }
+        k = key_map[label]
+        unit = "%" if "pct" in k or "overhead" in k or "reduction" in k else "ms"
+        v1 = row_br.get(k, "?")
+        v2 = row_ma.get(k, "?")
+        v3 = row_sy.get(k, "?")
+        print(f"  {label:<40} {str(v1)+unit:>12} {str(v2)+unit:>15} {str(v3)+unit:>15}")
 
-    with open(f"{OUT}/benchmark_all.json", "w", encoding="utf-8") as f:
-        json.dump(all_res, f, indent=2, ensure_ascii=False)
-    print("\nTodos os arquivos salvos em src/")
+    with open(f"{OUT}/benchmark_all_128tps.json", "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\n  Arquivos salvos em src/")

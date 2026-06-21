@@ -1,3 +1,10 @@
+"""
+Cliente renderiza apenas o ClientPacket entregue pelo servidor.
+
+Conhece: aliados (sempre), inimigos visíveis (full), ghosts DR (none+predicted_px).
+NÃO conhece: inimigos fora do LOS, state bruto, StateMemory.
+"""
+
 from __future__ import annotations
 
 import math
@@ -7,167 +14,147 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from security.state import ClientPacket
 
+FADE_TICKS = 10
+
 
 class Client:
-    """Cliente — renderiza APENAS o ClientPacket entregue pelo servidor.
-
-    Sem acesso a StateMemory, state bruto ou qualquer dado não autorizado.
-    O servidor chama deliver_packet() a cada tick.
-
-    Anti pop-in:
-    - Ao receber "full": lerp suave em direção à posição alvo (DR prevista ou exata)
-    - Ao receber "none" com predicted_px: ghost desbotado na posição DR
-    - Ao receber "none" sem predicted_px: fade out gradual antes de sumir
-    """
-
-    FADE_TICKS = 8   # ticks de fade out antes de sumir completamente
 
     def __init__(
         self,
-        client_id: str,
-        cell_size: int = 50,
-        map_w: int = 20,
-        map_h: int = 20,
-        fps: int = 60,
+        pid:       str,
+        cell_size: int = 20,
+        map_w:     int = 60,
+        map_h:     int = 60,
+        fps:       int = 60,
+        team:      str = "team_a",
     ) -> None:
-        self.client_id = client_id
+        self.pid       = pid
         self.cell_size = cell_size
+        self.team      = team
         self._packet: ClientPacket | None = None
 
-        # posições de display em pixels (para lerp suave)
-        self._display_px: dict[str, tuple[float, float]] = {}
-        # velocidade de display (para inércia visual)
-        self._display_vel: dict[str, tuple[float, float]] = {}
-        # fade out: ticks restantes quando um jogador sai do FOV sem DR
-        self._fade: dict[str, int] = {}
-        # última posição de display conhecida (para fade out)
-        self._last_px: dict[str, tuple[float, float]] = {}
+        self._display_px:  dict[str, tuple[float, float]] = {}
+        self._fade:        dict[str, int] = {}
+        self._last_px:     dict[str, tuple[float, float]] = {}
 
         self.root = tk.Toplevel()
-        self.root.title(f"Client — {client_id}")
+        self.root.title(f"Cliente — {pid}  ({team})")
         w, h = map_w * cell_size, map_h * cell_size
-        self.canvas = tk.Canvas(self.root, width=w, height=h, bg="black")
+        self.canvas = tk.Canvas(self.root, width=w, height=h, bg="#0d0d0d")
         self.canvas.pack()
 
-        self._running = True
+        self._running  = True
         self._interval = int(max(1, 1000 / fps))
         self._loop()
-
-    # Interface pública
 
     def deliver_packet(self, packet: "ClientPacket") -> None:
         self._packet = packet
 
-    # Renderização
-
-    def _lerp(self, cur: tuple[float, float], target: tuple[float, float], t: float) -> tuple[float, float]:
-        return (cur[0] + (target[0] - cur[0]) * t, cur[1] + (target[1] - cur[1]) * t)
+    def _lerp(self, cur, target, t):
+        return (cur[0] + (target[0] - cur[0]) * t,
+                cur[1] + (target[1] - cur[1]) * t)
 
     def _draw(self) -> None:
         if self._packet is None:
             return
-        packet = self._packet
-        self.canvas.delete("all")
+        p  = self._packet
         cs = self.cell_size
+        self.canvas.delete("all")
 
         # obstáculos
-        for obs in packet.obstacles:
-            ox, oy, ow, oh, cor, estilo = obs
-            x1, y1 = ox * cs, oy * cs
-            x2, y2 = (ox + ow) * cs, (oy + oh) * cs
-            fill = cor if estilo == "solid" else ""
-            self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=cor)
+        for obs in p.obstacles:
+            ox, oy, ow, oh, *_ = obs
+            self.canvas.create_rectangle(
+                ox * cs, oy * cs, (ox + ow) * cs, (oy + oh) * cs,
+                fill="#333", outline="#555",
+            )
 
-        r = max(4, cs // 4)
-        active_pids = set(packet.all_pids())
+        # smokes (visíveis para todos)
+        for s in p.smokes:
+            px = s["cx"] * cs
+            py = s["cy"] * cs
+            r  = s["radius"] * cs
+            self.canvas.create_oval(px - r, py - r, px + r, py + r,
+                                    fill="#557777", outline="#88aaaa", stipple="gray50")
 
-        for pid in active_pids:
-            level   = packet.level(pid)
-            pos     = packet.pos(pid)
-            dr_px   = packet.get(pid).get("predicted_px")
-            is_enemy = str(pid).startswith("enemy")
+        r_dot = max(3, cs // 3)
 
-            # ---- self ----
-            if pid == self.client_id:
-                if pos is None:
-                    continue
-                px = pos[0] * cs + cs / 2
-                py = pos[1] * cs + cs / 2
-                self.canvas.create_oval(px - r, py - r, px + r, py + r, fill="cyan")
-                self._display_px[pid] = (px, py)
-                self._fade.pop(pid, None)
-                continue
+        # self não está nos entries (servidor o removeu dos aliados do próprio player)
+        # posição do self vem sempre do estado local (nunca é filtrada)
 
-            # ---- full (visível com posição exata) ----
+        # aliados (sempre visíveis)
+        for apid, apos in p.allies.items():
+            ax, ay, *_ = apos
+            apx = ax * cs + cs / 2
+            apy = ay * cs + cs / 2
+            # azul para team_a, verde para team_b dependendo do time do cliente
+            color = "#4488ff" if self.team == "team_a" else "#44ff88"
+            self.canvas.create_oval(apx - r_dot, apy - r_dot, apx + r_dot, apy + r_dot,
+                                    fill=color, outline="white")
+            self.canvas.create_text(apx, apy - r_dot - 3, text=apid[-2:],
+                                    fill="white", font=("Courier", 6))
+
+        # inimigos
+        for epid in p.all_enemy_pids():
+            level  = p.level(epid)
+            pos    = p.pos(epid)
+            dr_px  = p.get(epid).get("predicted_px")
+
             if level == "full" and pos is not None:
                 raw_px = (pos[0] * cs + cs / 2, pos[1] * cs + cs / 2)
-                # target: DR previsto (mais suave) ou posição exata
-                target = dr_px if dr_px is not None else raw_px
-
-                cur = self._display_px.get(pid, target)
-                # lerp adaptativo: mais rápido quando longe (evita lag perceptível)
-                dist = math.hypot(target[0] - cur[0], target[1] - cur[1])
-                t = min(0.9, 0.3 + dist / (cs * 4))
+                target = dr_px if dr_px else raw_px
+                cur    = self._display_px.get(epid, target)
+                dist   = math.hypot(target[0] - cur[0], target[1] - cur[1])
+                t      = min(0.9, 0.25 + dist / (cs * 5))
                 nx, ny = self._lerp(cur, target, t)
+                self._display_px[epid] = (nx, ny)
+                self._last_px[epid]    = (nx, ny)
+                self._fade.pop(epid, None)
+                color = "#ff4444" if self.team == "team_a" else "#ff8844"
+                self.canvas.create_oval(nx - r_dot, ny - r_dot, nx + r_dot, ny + r_dot,
+                                        fill=color, outline="white")
+                self.canvas.create_text(nx, ny - r_dot - 3, text=epid[-2:],
+                                        fill="white", font=("Courier", 6))
 
-                self._display_px[pid] = (nx, ny)
-                self._last_px[pid] = (nx, ny)
-                self._fade.pop(pid, None)   # cancela fade se voltou ao FOV
-
-                color = "red" if is_enemy else "green"
-                self.canvas.create_oval(nx - r, ny - r, nx + r, ny + r, fill=color)
-                # label de debug (pequeno)
-                self.canvas.create_text(nx, ny - r - 4, text=str(pid), fill="white", font=("Courier", 7))
-                continue
-
-            # ---- none ----
-            if level == "none":
-                self._display_px.pop(pid, None)
-
+            elif level == "none":
+                self._display_px.pop(epid, None)
                 if dr_px is not None:
-                    # Ghost DR: o servidor ainda tem extrapolação válida
-                    color = "#880000" if is_enemy else "#008800"
                     dpx, dpy = dr_px
-                    self._last_px[pid] = (dpx, dpy)
-                    self._fade.pop(pid, None)
-                    self.canvas.create_oval(
-                        dpx - r, dpy - r, dpx + r, dpy + r,
-                        fill=color, outline="#555", dash=(2, 3),
-                    )
+                    self._last_px[epid] = (dpx, dpy)
+                    self._fade.pop(epid, None)
+                    self.canvas.create_oval(dpx - r_dot, dpy - r_dot,
+                                            dpx + r_dot, dpy + r_dot,
+                                            fill="#662222", outline="#444", dash=(2, 3))
                 else:
-                    # DR expirou — fade out gradual para evitar desaparecimento brusco
-                    ticks_left = self._fade.get(pid, self.FADE_TICKS)
-                    last = self._last_px.get(pid)
-                    if last is not None and ticks_left > 0:
-                        alpha_ratio = ticks_left / self.FADE_TICKS
-                        # simula fade via cor mais escura a cada tick
-                        level_hex = int(alpha_ratio * 0x88)
-                        hex_str = f"#{level_hex:02x}0000" if is_enemy else f"#00{level_hex:02x}00"
+                    ticks_left = self._fade.get(epid, FADE_TICKS)
+                    last = self._last_px.get(epid)
+                    if last and ticks_left > 0:
+                        a = int(ticks_left / FADE_TICKS * 0x66)
+                        col = f"#{a:02x}0000"
                         lx, ly = last
-                        self.canvas.create_oval(
-                            lx - r, ly - r, lx + r, ly + r,
-                            fill=hex_str, outline="#333", dash=(1, 4),
-                        )
-                        self._fade[pid] = ticks_left - 1
+                        self.canvas.create_oval(lx - r_dot, ly - r_dot,
+                                                lx + r_dot, ly + r_dot,
+                                                fill=col, outline="#222", dash=(1, 4))
+                        self._fade[epid] = ticks_left - 1
                     else:
-                        # sumiu completamente
-                        self._fade.pop(pid, None)
-                        self._last_px.pop(pid, None)
+                        self._fade.pop(epid, None)
+                        self._last_px.pop(epid, None)
 
         self._draw_legend()
 
     def _draw_legend(self) -> None:
+        cs = self.cell_size
         items = [
-            ("■ Você",                     "cyan"),
-            ("■ Inimigo (visível)",         "red"),
-            ("■ Aliado (visível)",          "green"),
-            ("⋯ Ghost DR (saindo FOV)",     "#880000"),
-            ("⋯ Fade out (DR expirado)",    "#440000"),
+            ("■ Aliado",         "#4488ff" if self.team == "team_a" else "#44ff88"),
+            ("■ Inimigo (LOS)",  "#ff4444"),
+            ("⋯ Ghost DR",       "#662222"),
+            ("○ Smoke",          "#557777"),
         ]
-        y0 = 6
+        y0 = 4
         for label, color in items:
-            self.canvas.create_text(8, y0, text=label, fill=color, anchor="nw", font=("Courier", 8))
-            y0 += 12
+            self.canvas.create_text(4, y0, text=label, fill=color, anchor="nw",
+                                    font=("Courier", 7))
+            y0 += 11
 
     def _loop(self) -> None:
         if not self._running:

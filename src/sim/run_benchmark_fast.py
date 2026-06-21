@@ -2,6 +2,7 @@ import json
 import os
 import sys
 
+# ensure src is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from sim.benchmark import simulate_ping_benchmark
@@ -24,6 +25,7 @@ if __name__ == '__main__':
         "Fortaleza": 110,
         "Porto_Alegre": 70,
     }
+    # reduced ticks for quick run
     res = simulate_ping_benchmark(state, cfg, regions, ticks=20)
     out_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'benchmark_results.json'))
     with open(out_path, 'w', encoding='utf-8') as f:

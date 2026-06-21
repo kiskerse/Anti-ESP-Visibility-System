@@ -1,301 +1,250 @@
-# Relatório Técnico — Anti-Wallhack com Dead-Reckoning
+# Relatório Técnico — Anti-Wallhack FoW @ 128 TPS
 
-## Impacto Competitivo, Benchmark com Fórmula de Delay e Análise de Vantagem ESP
-
-**Submetido à:** Riot Games — Anti-Cheat / Game Security  
-**Data:** 2026-06-18
-
----
-
-> [!IMPORTANT]
-> Este sistema **minimiza** a vantagem do wallhack no Valorant. Ele **não elimina** o problema.
-
-## 1. Sumário
-
-| Métrica | Valor (cenário realista, SP) |
-| ------- | ---------------------------- |
-| Compute por tick | ~0.57ms |
-| Overhead do budget 60 TPS | ~3.4% |
-| CPU do processo (raycasting) | < 5% |
-| GPU utilizada | 0% (Canvas 2D = CPU-only) |
-| DR coverage (anti pop-in) | 100% |
-| Pop-in residual | 0 eventos |
-| Redução de vantagem wallhack | ~60% (inimigos mistos: próximos + distantes) |
-| Delay total (São Paulo, 30ms ping) | ~42ms |
-| Delay total (Manaus, 120ms ping) | ~87ms |
-
-O número de **60% de redução de vantagem** merece contexto: ocorre em cenário onde metade
-dos inimigos está próxima (potencialmente visível) e metade está em cantos distantes do mapa.
-Quando todos os inimigos estão atrás de obstáculos, a redução chega a 100%.
-Quando todos estão em linha de visão direta, a redução é 0% — mas nesse caso o cheat não
-oferece vantagem de qualquer forma (o cliente legítimo os vê).
+**Protótipo:** Potentially Visible Set (PVS) + Entry Masking + Adaptive Dead Reckoning (DR) Cap + Hysteresis  
+**Ambiente de Execução:** Python 3.11 · numpy 2.4 · psutil 7.2 · Dimensões do mapa: 36–60×36–60 células · População: 10 jogadores (5v5)  
+**Data da Avaliação:** 2026-06-19
 
 ---
 
-## 2. Fórmula de Delay Total
+## Declaração de Escopo
 
-### 2.1 Definição
+Este sistema foi projetado para **minimizar** a vantagem proporcionada por softwares de trapaça (wallhacks) em um vetor de ataque específico: a leitura direta da memória do processo para obtenção das posições de entidades inimigas situadas fora do campo de visão (Line of Sight - LOS). Ressalta-se que esta abordagem não visa erradicar o wallhack como categoria de trapaça.
 
-$$
-D_T = \left(\frac{P}{2}\right) + T_c + J_c + M_s
-$$
+Limitações arquiteturais inalienáveis:
 
-- $D_T$ - Delay total
-- $P$ - Ping (em `ms`)
-- $T_c$ - Compensação do Tick
-- $J_c$ - Compensação do Jitter
-- $M_s$ - Margem de Segurança
+- Um cliente que renderiza uma entidade inimiga visível deve, imperativamente, possuir as coordenadas espaciais correspondentes alocadas em memória. Esta é uma restrição inerente aos pipelines de renderização gráfica contemporâneos, não passível de mitigação em nível de software aplicativo.
+- Mecanismos de trapaça que operam em anel de privilégio 0 (nível de kernel), através de drivers customizados ou interceptação via hardware externo (e.g., DMA), permanecem imunes a quaisquer contramedidas implementadas no espaço de usuário.
 
-| Componente | Fórmula | Descrição |
-| --- | --- | --- |
-| `Ping / 2` | RTT / 2 | One-way delay ao servidor (metade do RTT) |
-| `Compensação do Tick` | 1000 / server_fps | Janela de um tick completo (16.67ms @ 60 TPS) |
-| `Compensação do Jitter` | std_dev(inter-tick intervals) | Variação estatística entre ticks consecutivos |
-| `Margem de Segurança` | 10ms fixo | Buffer conservador para picos de latência |
+O escopo deste protótipo restringe-se a validar se a implementação conjunta dos três mecanismos propostos — entry masking, DR cap adaptativo e hysteresis — é capaz de reduzir a janela de exposição de informações sensíveis em memória, sem introduzir overhead computacional deletério ou degradação da experiência do usuário (UX).
 
-### 2.2 Delay calculado por região (n_rays=360, 60 TPS)
+---
 
-| Região | Ping | Ping/2 | TickComp | JitterComp | Margem | **DelayTotal** |
-| --- | --- | --- | --- | --- | --- | --- |
-| São Paulo | 30ms | 15ms | 16.67ms | ~0.13ms | 10ms | **~42ms** |
-| Rio de Janeiro | 40ms | 20ms | 16.67ms | ~0.15ms | 10ms | **~47ms** |
-| Brasília | 55ms | 27.5ms | 16.67ms | ~0.15ms | 10ms | **~54ms** |
-| Porto Alegre | 70ms | 35ms | 16.67ms | ~0.20ms | 10ms | **~62ms** |
-| Manaus | 120ms | 60ms | 16.67ms | ~0.20ms | 10ms | **~87ms** |
-| Los Angeles | 140ms | 70ms | 16.67ms | ~0.50ms | 10ms | **~97ms** |
-| London | 180ms | 90ms | 16.67ms | ~0.70ms | 10ms | **~117ms** |
-| Sydney | 260ms | 130ms | 16.67ms | ~1.00ms | 10ms | **~158ms** |
+## Demonstração Funcional
+
+1. Servidor (visão onisciente)
+2. Cliente (visão filtrada)
+3. ESP Protegido
+4. ESP Desprotegido
+
+![Demo](/docs/demo_antiwallhack.mp4)
+
+**Diretrizes de observação da demonstração:**
+
+- **Servidor:** Apresenta visibilidade integral e em tempo real dos 10 jogadores, incluindo oclusões dinâmicas (smokes) e estáticas (paredes).
+- **Cliente:** Renderiza exclusivamente entidades aliadas (azul) e inimigas com confirmação de LOS (vermelho). Entidades inimigas ocluídas por geometria estática permanecem ausentes. O efeito de Ghost DR é manifestado transitoriamente no momento em que uma entidade inimiga transita para fora do LOS.
+- **ESP Protegido:** Simulação de cheat operando via leitura da estrutura `ClientPacket` — exibe dados idênticos aos do cliente legítimo, sem vazamento de entidades extras. Instâncias de Ghost DR são denotadas pelo caractere `~`, indicando precisão espacial degradada.
+- **ESP Desprotegido:** Simulação de cheat operando via leitura bruta da estrutura `state` — entidades ocluídas são renderizadas em vermelho com a flag `ESP!`. O diferencial de vantagem informacional é quantificado pelo contador no rodapé da interface.
+
+---
+
+## 1. Resultados de Benchmark
+
+### 1.1 Custo Computacional por Tick — Região Brasil
+
+Metodologia de medição: Amostragem de 15 a 25 ticks por região, algoritmo de pathfinding ativo (atualização de movimento a cada 2 ticks) e 3 instâncias de smokes ativas.
+
+![Compute por tick](docs/chart_compute.png)
+
+| Região | Latência (Ping) | Tempo de Processamento | Overhead Relativo | DR Cap | Redução de Ghost | Atraso Total |
+|--------|-----------------|------------------------|-------------------|--------|------------------|--------------|
+| São Paulo | 30ms | 0.2101ms | 2.69% | 60ms | 76% | 32.9ms |
+| Rio de Janeiro | 40ms | 0.2074ms | 2.66% | 80ms | 68% | 37.9ms |
+| Brasília | 55ms | 0.2261ms | 2.89% | 110ms | 56% | 45.4ms |
+| Belo Horizonte | 48ms | 0.1824ms | 2.33% | 96ms | 61% | 41.9ms |
+| Curitiba | 52ms | 0.2028ms | 2.60% | 104ms | 58% | 43.9ms |
+| Porto Alegre | 70ms | 0.2303ms | 2.95% | 140ms | 44% | 52.9ms |
+| Salvador | 90ms | 0.2339ms | 2.99% | 150ms | 40% | 62.9ms |
+| Fortaleza | 110ms | 0.2336ms | 2.99% | 150ms | 40% | 72.9ms |
+| Recife | 105ms | 0.2350ms | 3.01% | 150ms | 40% | 70.3ms |
+| Manaus | 120ms | 0.2450ms | 3.14% | 150ms | 40% | 77.9ms |
+| Belém | 115ms | 0.2125ms | 2.72% | 150ms | 40% | 75.4ms |
 
 > [!TIP]
-> O delay total representa a janela máxima de incerteza de posição que o
-DR precisa cobrir. Com DR cap de 250ms, o ghost cobre confortavelmente todos os cenários
-testados. A Compensação do Jitter é pequena (geralmente $\leqslant$ 1ms) porque o raycasting é determinístico e
-não introduz variância de processamento significativa neste protótipo Python.
+> **Orçamento computacional a 128 TPS:** 7.8125ms. **Overhead máximo registrado:** 3.14%. **Ticks descartados (dropped):** 0. Os resultados indicam ampla margem de segurança para operação em produção.
 
 ---
 
-## 3. Uso de CPU e GPU
+### 1.2 Adaptive DR Cap e Mitigação de Exposição de Ghost
 
-[![Watch the video](https://markdown-videos-api.jorgenkh.no/youtube/HVZZQFaUx_E)](https://youtu.be/HVZZQFaUx_E)
+![DR cap adaptativo](docs/chart_dr_cap.png)
 
-### 3.1 CPU
-
-O raycasting é puramente sequencial e executado na thread do servidor a cada tick.
-
-| Cenário | Compute puro | CPU do processo | Observação |
-| --- | --- | --- | --- |
-| n_rays=360, 25 obstáculos | ~0.20–0.57ms | < 5% | Python puro, single-thread |
-| n_rays=720, 25 obstáculos | ~0.35–0.87ms | < 8% | 2× raios, ~60% mais compute |
-| n_rays=360, 40 obstáculos | ~0.19–0.88ms | < 6% | mais obstáculos não aumentam muito; O(raios × obstáculos) por passo |
-
-> [!NOTE]
-> Os valores de CPU acima são para o processo de benchmark isolado.
-Em produção com múltiplos jogadores simultâneos, o custo escala linearmente com o número
-de pares (observador, alvo) — não com o total de jogadores.
-
-### 3.2 GPU
-
-**GPU utilizada: 0%.**
-
-O protótipo usa Tkinter/Canvas, que é renderização 2D por CPU (sem aceleração de hardware).
-Isso é intencional para o protótipo — a lógica do servidor (raycasting + StateMemory) não
-usa GPU de nenhuma forma.
-
-Em produção no Valorant:
-
-- O servidor de jogo não renderiza nada — CPU only
-- O cliente usa GPU para renderização, mas isso é independente deste sistema
-- A vantagem deste sistema em produção é exatamente essa separação: o servidor (CPU) decide
-  o que enviar; o cliente (GPU) renderiza apenas o autorizado
-
----
-
-## 4. Simulação do Wallhack ESP
-
-[![Watch the video](https://markdown-videos-api.jorgenkh.no/youtube/WgowtZMCr2s)](https://www.youtube.com/embed/WgowtZMCr2s)
-
-### 4.1 O que foi simulado
-
-O módulo `wallhack_esp.py` simula dois cenários:
-
-**Modo desprotegido** (`sem_protecao=True`):
-
-- Lê o `state` bruto do servidor diretamente
-- Desenha todos os inimigos em vermelho, sem obstáculos
-- Representa o que um wallhack faria num jogo sem este sistema
-
-> [!NOTE]
-> O modo `Sem Proteção` é como o cheat se comportaria sem a proteção
-
-**Modo protegido** (`sem_protecao=False`):
-
-- Lê o mesmo `ClientPacket` que o cliente legítimo recebe
-- Só pode desenhar o que o servidor autorizou
-- Demonstra que o cheat não obtém informação adicional
+A formulação matemática para o cálculo do teto de Dead Reckoning é definida por:  
+$Dr_{cap} = \text{clamp}\left(2 \times RTT, 50ms, 150ms\right)$
 
 > [!IMPORTANT]
-> A "vantagem wallhack" é definida como: $ \text{vantagem} = (\text{inimigos que o cheat vê}) − (\text{inimigos que o cliente legítimo já vê}) $
+> Sob a taxa de atualização de 128 TPS, o limite estático anterior de 250ms resultava em 32 ticks de persistência de ghost. O limite adaptativo mitiga essa exposição para um intervalo de 7 a 19 ticks, condicionado à latência da rede, sem introduzir degradação visual (pop-in), dado que o piso de 50ms garante a cobertura de, no mínimo, um Round-Trip Time (RTT) completo.
 
-### 4.2 Resultados da simulação
+---
 
-#### Cenário realista (player no centro, inimigos mistos — próximos e distantes)
+### 1.3 Análise Comparativa de Atraso Total — 60 TPS vs 128 TPS
 
-| Situação | Inimigos extras via cheat | Redução de vantagem |
-| --- | --- | --- |
-| Sem proteção (baseline) | ~8 de 8 | — |
-| Com proteção + player no canto | ~8 de 8 | ~0% (nenhum em LOS) |
-| Com proteção + player no centro | ~3.2 de 8 | **~60%** |
-| Com proteção + todos em LOS | 0 de 8 | 100% (cheat = legítimo) |
+![Delay total comparativo](docs/chart_delay_compare.png)
 
-**Por que 60% e não 100%?**
+A modelagem do atraso total é dada pela equação:  
+`DelayTotal = (Ping / 2) + TickComp + JitterComp + 10ms`
 
-Porque o sistema protege apenas inimigos **fora do LOS**. Os ~3.2 inimigos "extras" que o
-cheat ainda vê são os que estão em linha de visão direta com o player1 — o cliente legítimo
-também os veria, então não há vantagem real. O número de ~3.2 inclui inimigos em transição
-(entrando/saindo do LOS durante o movimento da IA) cobertos pelo ghost DR.
+Na transição para 128 TPS, a variável `TickComp` é reduzida de 16.67ms para 7.81ms, resultando em um ganho de 8.86ms por tick em todas as regiões avaliadas. O benefício percentual é mais pronunciado em conexões de baixa latência (e.g., São Paulo: redução de 21%) e menos significativo em conexões de alta latência, onde o RTT atua como fator dominante.
 
-A vantagem real do wallhack com este sistema ativo é **zero para inimigos visíveis** e
-**provavelmente baixas para inimigos fora do LOS** (não há dado na memória. Entretanto, nos testes não foram expostos nenhum caso a qual o cheat recebia uma vantagem). O único valor residual seria
-o ghost DR — mas ele contém apenas extrapolação de velocidade, não posição confirmada,
-e expira em 250ms.
+> [!NOTE]
+> A simulação não incorpora o atraso inato ao pipeline de processamento do Valorant, uma vez que tais dados proprietários não estão disponíveis para esta análise.
+
+---
+
+### 1.4 Sensibilidade do Atraso Total ao Jitter de Rede
+
+![Jitter sweep](docs/chart_jitter.png)
+
+> [!NOTE]
+> O jitter aferido em ambiente de benchmark apresentou valores entre 0.03ms e 0.1ms. Esta variância ínfima decorre da natureza determinística do algoritmo PVS (ausência de operações de raycasting em tempo de execução). Em cenários de produção com topologias de rede reais, estima-se um desvio padrão ($\sigma$) entre 1ms e 5ms, dependendo da estabilidade da rota. O gráfico ilustra o impacto teórico de diferentes magnitudes de jitter no cálculo do atraso total.
+
+---
+
+### 1.5 Eficácia Acumulada dos Mecanismos de Segurança
+
+![Mecanismos comparativos](docs/chart_mechanisms.png)
 
 > [!WARNING]
-> Poderá haver alguns movimentos sem sentidos, porém, acredito que não é algo que você poderá ver, principalmente em um FPS
+> Os valores apresentados possuem caráter estritamente qualitativo para fins de visualização comparativa. As métricas "Info leak score" e "Pop-in risk" carecem de unidades absolutas e servem apenas para representar a magnitude relativa do vetor de risco sob diferentes configurações.
 
-### 4.3 Comparação visual (como aparece no ESP)
+> [!TIP]
+> A técnica de **Entry Masking** demonstra a maior eficácia isolada na mitigação do vazamento de informações (info leak). O **Adaptive DR Cap** atua primariamente na supressão do risco de artefatos visuais (pop-in). O mecanismo de **Hysteresis** apresenta impacto secundário, porém crucial, no tratamento de casos de borda de LOS e na resistência a ataques de correlação temporal.
 
-```j
+---
 
-SEM proteção:                        COM proteção:
-┌──────────────────────────────┐    ┌──────────────────────────────┐
-│  [■] inimigo 1 (ESP!)        │    │  [■] inimigo 1 (já visível)  │
-│  [■] inimigo 2 (ESP!)        │    │                              │
-│  [■] inimigo 3 (ESP!)        │    │  [⋯] ghost DR inimigo 3      │
-│  [■] inimigo 4 (já visível)  │    │  [■] inimigo 4 (já visível)  │
-│  [■] inimigo 5 (ESP!)        │    │                              │
-│  [■] inimigo 6 (ESP!)        │    │                              │
-│  [■] inimigo 7 (ESP!)        │    │                              │
-│  [■] inimigo 8 (ESP!)        │    │                              │
-│  ← SEM obstáculos            │    │  ← SEM obstáculos            │
-│  Vantagem: +7 inimigos       │    │  Vantagem: 0 inimigos        │
-└──────────────────────────────┘    └──────────────────────────────┘
+## 2. Análise Detalhada dos Mecanismos Propostos
 
+### 2.1 Entry Masking
+
+**Funcionalidade:** Durante o tick de transição para o estado de visibilidade (`NONE → ENTERING`), o servidor transmite coordenadas espaciais truncadas, correspondentes a um grid de 4 células (introduzindo uma incerteza de ±2 células), em detrimento do vetor de posição exato. A posição precisa é transmitida exclusivamente no tick subsequente (`ENTERING → VISIBLE`).
+
+```text
+Comportamento Padrão (Sem Masking):
+  Tick N:   Entidade transita para LOS → Memória: pos=(44,15) [EXATO]
+  Vantagem: O wallhack detém as coordenadas exatas do peek no momento zero.
+
+Comportamento Modificado (Com Masking):
+  Tick N:   Entidade transita para LOS → Memória: pos=(44,16) [TRUNCADO]
+  Tick N+1: Entidade confirmada em LOS → Memória: pos=(45,15) [EXATO]
+  Vantagem: No Tick N, o wallhack obtém apenas um raio de incerteza (±2 células).
 ```
 
 > [!NOTE]
-> O ghost DR (⋯) aparece apenas para inimigos que saíram do LOS recentemente, com posição
-imprecisa (extrapolada). Provavelmente não é útil para `Aim Assistance (Aimbot)`.
+> O custo temporal desta operação é de $2 \times 7.8125ms = 15.62ms$. Consequentemente, a renderização da entidade na interface do cliente legítimo é postergada em 15.62ms em relação ao modelo não mascarado.
+
+**Limitações:** Este mecanismo é ineficaz contra trapaças que realizam a leitura direta do frame buffer renderizado, visto que a entidade já se encontra presente na tela durante o tick de mascaramento (ainda que em posição aproximada).
+
+### 2.2 Adaptive DR Cap
+
+**Funcionalidade:** Restringe dinamicamente o tempo de vida do estado de Ghost DR com base na latência regional. Utilizando São Paulo (30ms RTT) como caso de estudo, o limite é ajustado para 60ms, representando uma redução de 76% na janela de persistência do ghost em comparação ao limite estático legado de 250ms.
+
+**Limitações:** O mecanismo não erradica a existência do ghost. A manutenção de um limite mínimo de 50ms é imperativa para acomodar a latência de, pelo menos, um ciclo completo de RTT. A eliminação total deste buffer resultaria em severos artefatos de pop-in visual.
+
+> [!CAUTION]
+> A função limitadora `clamp(2×RTT, 50ms, 150ms)` foi parametrizada de forma conservadora. Em um ambiente de produção, onde o RTT é monitorado continuamente, recomenda-se a calibração dinâmica e individualizada por cliente, em oposição à atual parametrização regional.
+
+### 2.3 Hysteresis
+
+**Funcionalidade:** Impõe a exigência de um tick consecutivo de confirmação espacial antes de autorizar a transição de estados de visibilidade (`NONE → ENTERING` e `VISIBLE → NONE`). Este filtro temporal mitiga oscilações rápidas (flickering) em limiares de LOS e eleva a complexidade computacional requerida para correlacionar timestamps de alteração de memória com a topologia estática do mapa.
+
+**Limitações:** Constitui-se como um mecanismo de ofuscação (security through obscurity) e não de bloqueio criptográfico. Algoritmos de trapaça dotados de heurísticas avançadas podem eventualmente compensar a histerese introduzida.
 
 ---
 
-## 5. Benchmark
+### 2.4 Spatial Uncertainty Mapping (SUM) para Áudio e outros eventos
 
-### 5.1 Cenário realista (n_rays=360, 25 obstáculos, IA ativa)
+**Conceito e Aplicação:** O Spatial Uncertainty Mapping (SUM) é uma técnica que visa introduzir intencionalmente um grau de imprecisão na representação espacial de eventos, como fontes sonoras. Em vez de fornecer uma localização exata de um evento (e.g., passos, disparos), o sistema reportaria uma área de probabilidade ou um conjunto de coordenadas aproximadas de onde o evento poderia ter se originado. Esta abordagem espelha o princípio do Entry Masking visual, mas aplicado ao domínio auditivo.
 
-| Região | Ping | Compute | Overhead | TPS | WH Adv | WH Red% | DR Cov | DelayTotal |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| São Paulo | 30ms | 0.57ms | 3.4% | ~24 | 3.2 | 60.0% | 100% | 41.8ms |
-| Rio de Janeiro | 40ms | 0.57ms | 3.4% | ~21 | 3.2 | 60.0% | 100% | 46.8ms |
-| Brasília | 55ms | 0.57ms | 3.4% | ~17 | 3.2 | 60.0% | 100% | 54.3ms |
-| Porto Alegre | 70ms | 0.57ms | 3.4% | ~14 | 3.2 | 60.0% | 100% | 61.8ms |
-| Manaus | 120ms | 0.57ms | 3.4% | ~8 | 3.2 | 60.0% | 100% | 86.8ms |
+**Funcionalidade Potencial:** Para sons gerados por entidades inimigas fora do campo de visão direto, o servidor poderia transmitir dados de áudio com uma localização espacial deliberadamente ambígua. Por exemplo, em vez de `som_passos @ (X, Y, Z)`, o sistema poderia fornecer `som_passos @ (Área_de_Incerteza_A)` ou `som_passos @ (X±Δx, Y±Δy, Z±Δz)`. Isso forçaria cheats que dependem de dados de áudio precisos a operar com informações degradadas, similar à forma como o Entry Masking afeta a precisão visual.
 
-> [!NOTE]
-> *TPS baixo em Manaus = RTT alto, não overhead do sistema. Compute permanece < 1ms.*
+**Benefícios:**
 
-### 5.2 Alta precisão (n_rays=720, 25 obstáculos)
+- **Mitigação de Cheats Auditivos:** Reduz a eficácia de cheats que processam dados de áudio para pinpointar a localização exata de inimigos através de paredes ou fumaça.
+- **Preservação da Experiência:** A incerteza pode ser calibrada para ser sutil o suficiente para não impactar negativamente a percepção de jogadores legítimos, que já dependem de pistas auditivas mais contextuais e menos precisas do que dados brutos de memória.
+- **Complementaridade:** Atua como um complemento aos mecanismos visuais, criando uma camada adicional de proteção contra a exploração de informações espaciais.
 
-| Região | Compute | Overhead | WH Red% | DelayTotal |
-| --- | --- | --- | --- | --- |
-| São Paulo | 0.87ms | 5.2% | 60.0% | 42.1ms |
-| Manaus | 0.87ms | 5.2% | 60.0% | 87.1ms |
+**Limitações:**
 
-> [!NOTE]
-> Dobrar os raios aumenta o overhead de 3.4% para 5.2% — ainda confortável.
-Não altera a vantagem wallhack (determinada por LOS, não por densidade de raios após certo limiar).
-
-### 5.3 Mapa denso (n_rays=360, 40 obstáculos)
-
-Com 40 obstáculos (mapa mais próximo do Valorant):
-
-- Compute sobe levemente (~0.88ms) por causa de mais colisões por raio
-- WH reduction **sobe para ~75-85%** porque mais obstáculos = menos LOS = wallhack vê menos
-- Confirma que em mapas mais complexos o sistema é **mais eficaz**, não menos
+- **Calibração:** A determinação do nível ideal de incerteza é crítica. Um valor muito alto pode prejudicar a jogabilidade legítima, enquanto um valor muito baixo pode ser ineficaz contra cheats.
+- **Complexidade de Implementação:** Requer modificações no pipeline de áudio do servidor e cliente para introduzir e interpretar a incerteza espacial de forma consistente.
 
 ---
 
-## 6. O que este sistema NÃO faz
+## 3. Quantificação da Vantagem do Wallhack
 
-- **Não detecta cheaters.** Vanguard faz isso. Este sistema é complementar.
-- **Não remove vantagem para inimigos em LOS.** Nem deve — o jogador legítimo também os vê.
-- **Não funciona como única proteção.** Em mapas abertos sem obstáculos, o LOS é quase
-  total e o wallhack veria tudo igualmente.
-- **Não substitui driver-level AC.** Um cheat que intercepta pacotes de rede ainda
-  receberia o ClientPacket — mas esse pacote já é filtrado por design.
+A eficácia do sistema na redução da vantagem informacional é altamente dependente do estado da partida, variando de 0% a 100% por tick, em função da distribuição espacial das entidades:
 
-### 6.1 Por que ainda vale para o Valorant
+- **0% de Redução:** Ocorre quando todos os 5 oponentes encontram-se em LOS simultâneo. Neste cenário, a memória do cliente e a do cheat contêm os mesmos dados, resultando em vantagem marginal nula.
+- **100% de Redução:** Ocorre quando todos os oponentes estão ocluídos pela geometria. A memória do cliente permanece desprovida das estruturas dos pids inimigos, neutralizando completamente o vetor de ataque.
+- **Cenário Típico (Misto):** Em simulações utilizando movimentação via IA, observou-se uma redução média de 40% a 56% na vantagem informacional.
 
-O Valorant tem mapas densos com múltiplas camadas de cobertura. Em condições típicas de
-partida, estima-se que 60–80% dos inimigos estão fora do LOS em qualquer dado momento.
-Este sistema blinda exatamente essa janela — os inimigos que o wallhack mais explora são
-os que estão atrás de paredes enquanto o jogador se posiciona.
-
-A vantagem tática eliminada é a mais importante: **saber que há um inimigo se posicionando
-atrás de uma parede específica antes de você dobrar o ângulo**.
+> [!TIP]
+> A métrica fundamental de sucesso é o comportamento em **0% quando todos estão em LOS**. Este é o estado desejado: o cheat não deve prover informações além daquelas já disponíveis visualmente ao jogador legítimo. Inversamente, quando a entidade sai do LOS, os dados devem ser expurgados da memória. Adverte-se, contudo, que as métricas aferidas neste ambiente sintético podem não traduzir-se linearmente para títulos de alta complexidade como Valorant.
 
 ---
 
-## 7. Conclusão
+## 4. Potentially Visible Set (PVS) — Complexidade e Armazenamento
 
-O sistema reduz a vantagem do wallhack em **~60% em condições mistas** e em até **100%
-para inimigos fora do LOS** — que é exatamente o caso de uso principal do cheat.
-
-O custo computacional foi considerado desprezível (< 5% do budget do servidor em Python puro). O anti pop-in é completo (DR coverage possuiu bons números em todos os testesm, demonstrando alta eficiência).
-
-> [!WARNING]
-> Como já comentado antes, esse projeto não é a solução para eliminar ESP e vazamento de state na memória, e sim um minimizador das vantagens do ESP. Além disso, o desempenho parece não ser afetado de forma significativa aqui, entretanto, vale ressaltar que essa implementação em jogos multiplayer poderá haver eficiência diferente. Com isso, é interessante fazer adaptações ao implementar
+| Dimensões do Mapa | Quantidade de Obstáculos | Tempo de Compilação (Python) | Tamanho do Cache |
+|-------------------|--------------------------|------------------------------|------------------|
+| 36×36 | 25 | 2.61s | 372 KB |
+| 60×60 | 45 | ~12–17s | ~1.6 MB |
 
 ---
 
-## Projeto & Testes
+## 5. Lacunas de Conhecimento e Trabalhos Futuros
 
-### A. Arquivos gerados
+As seguintes variáveis requerem investigação adicional e não foram contempladas no escopo atual:
 
-| Arquivo | Conteúdo |
-| --- | --- |
-| `benchmark_realista_brasil.json/csv` | n_rays=360, 25 obs, Brasil |
-| `benchmark_realista_global.json/csv` | n_rays=360, 25 obs, global |
-| `benchmark_hires_brasil.json/csv` | n_rays=720, 25 obs, Brasil |
-| `benchmark_denso_brasil.json/csv` | n_rays=360, 40 obs, Brasil |
-| `benchmark_all.json` | Todos consolidados |
+- Validação do algoritmo de oclusão frente a topologias 3D complexas (e.g., variações de elevação, planos inclinados).
+- Testes de estresse para avaliação de escalabilidade vertical (e.g., 50+ instâncias simultâneas em um único nó de servidor).
+- Análise de interferência com subsistemas de compensação de latência (lag compensation) e buffers de histórico posicional.
+- Avaliação da eficácia contra vetores de ataque alternativos (e.g., interceptação de pacotes de rede, DMA).
+- Impacto de habilidades que modificam a geometria de oclusão em tempo real.
+- Profiling de performance em arquiteturas de hardware de servidor bare-metal.
 
-### B. Como reproduzir
+A resolução destas incertezas demanda a transição do protótipo para um ambiente de homologação (staging) representativo.
+
+---
+
+## 6. Arquitetura do Repositório
+
+```text
+src/
+├── security/
+│   ├── pvs.py          ← Implementação PVSBuilder (numpy, processamento offline) + PVSIndex O(1) + compressão gzip
+│   ├── smoke.py        ← Subsistema de oclusão dinâmica (cálculo segmento-círculo)
+│   └── state.py        ← Gerenciamento de memória (DR adaptativo) e estruturação do ClientPacket
+├── sim/
+│   ├── game.py         ← Lógica de servidor: máquina de estados NONE/ENTERING/VISIBLE
+│   ├── client.py       ← Lógica de cliente: renderização restrita ao ClientPacket
+│   ├── wallhack_esp.py ← Simulação de ESP protegido/desprotegido com telemetria
+│   ├── players.py      ← Controle de input (WASD) e rotinas de IA (random walk)
+│   ├── map_gen.py      ← Geração procedural de mapas e zonas de spawn
+│   ├── tick_clock.py   ← Scheduler de alta precisão para 128 TPS (acumulador temporal + spin-wait)
+│   ├── start.py        ← Ponto de entrada: inicialização dos 4 painéis de visualização
+│   ├── benchmark.py    ← Execução headless para coleta de métricas
+│   └── run_benchmark_comparison.py
+docs/
+├── chart_compute.png
+├── chart_dr_cap.png
+├── chart_delay_compare.png
+├── chart_jitter.png
+├── chart_mechanisms.png
+└── demo_antiwallhack.mp4
+```
+
+---
+
+## 7. Instruções de Reprodução
 
 ```bash
+# Instalação das dependências necessárias
+pip install psutil numpy matplotlib pillow
+
+# Execução da suíte completa de benchmarks (saída em JSON e CSV no diretório src/)
 python src/sim/run_benchmark_comparison.py
-```
 
-### C. Como executar o ESP wallhack visual
-
-```bash
+# Inicialização da simulação visual interativa
 python src/sim/start.py
+# Controles: WASD (Movimentação) · R (Alternar IA) · H (Alternar ESP) · Espaço (Smoke) · T (Métricas)
 ```
-
-> [!NOTE]
-> Quatro janelas abrem:
-> 1. Servidor (omnisciente, com raios)
-> 2. Cliente legítimo (só o que o servidor autorizou)
-> 3. ESP protegido (cheat lendo ClientPacket — sem vantagem)
-> 4. ESP desprotegido (cheat lendo state bruto — com vantagem em vermelho)
-> 5. O controlador do simulador. Você deve deixar aberta com foco, assim, locomovendo apertando, nessa janela, WASD.
-
-### D. Dicionário
-
-| Termo | Definição |
-| --- | --- |
-| LOS | Line of Sight — raio desobstruído entre observador e alvo |
-| DR | Dead-reckoning — extrapolação de posição por velocidade estimada |
-| ESP | Extra Sensory Perception — tipo de wallhack que desenha bonecos sobre paredes |
-| RTT | Round-Trip Time — tempo de ida e volta na rede (ping) |
-| ClientPacket | Snapshot somente-leitura gerado pelo servidor com dados filtrados por LOS |
-| DelayTotal | Latência percebida pelo jogador incluindo ping, tick e jitter |

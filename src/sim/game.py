@@ -1,207 +1,268 @@
+"""
+Servidor — PVS + Smokes + Entry Masking + Hysteresis (128 TPS).
+
+Máquina de estados de visibilidade por par (observer, enemy):
+
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                   NONE                                           │
+  │       (nada na memória — LOS=false ou não confirmado)            │
+  └──────────────┬───────────────────────────────────────────────────┘
+                 │ LOS=true por HYSTERESIS_TICKS consecutivos
+                 ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                  ENTERING                                        │
+  │       (posição arredondada ENTRY_MASK_GRID por ENTRY_MASK_TICKS) │
+  │       ← evita revelar ponto exato de entrada no LOS             │
+  └──────────────┬───────────────────────────────────────────────────┘
+                 │ após ENTRY_MASK_TICKS
+                 ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                  VISIBLE                                         │
+  │       (posição exata enviada ao cliente)                         │
+  └──────────────┬───────────────────────────────────────────────────┘
+                 │ LOS=false por HYSTERESIS_TICKS consecutivos
+                 ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                  NONE  (DR ativo por adaptive_dr_cap_ms)         │
+  └──────────────────────────────────────────────────────────────────┘
+
+Parâmetros tuning:
+  HYSTERESIS_TICKS  = 1  → 7.8ms @ 128 TPS (evita flickering em borda de LOS)
+  ENTRY_MASK_TICKS  = 1  → 7.8ms @ 128 TPS
+  ENTRY_MASK_GRID   = 4  → +/-2 células de incerteza na posição de entrada
+"""
+
 from __future__ import annotations
 
-import math
 import random
 import tkinter as tk
-from typing import Any, List
+from dataclasses import dataclass
+from typing import Any
 
-from security.state import StateMemory
+from security.pvs   import PVSIndex, Cell
+from security.smoke import SmokeSystem
+from security.state import StateMemory, _round_to_grid, ENTRY_MASK_GRID
+
+
+# Parâmetros da máquina de estados
+HYSTERESIS_TICKS = 1   # ticks consecutivos para confirmar mudança de LOS
+ENTRY_MASK_TICKS = 1   # ticks de posição mascarada antes de revelar exata
+
+
+@dataclass
+class VisInfo:
+    """Estado de visibilidade de um par (observador, alvo)."""
+    state:           str   = "none"      # "none" | "entering" | "visible"
+    confirm_ticks:   int   = 0           # ticks consecutivos no estado atual
+    entry_ticks:     int   = 0           # ticks em "entering"
 
 
 class Game:
+
     def __init__(
         self,
-        istate: dict[str, Any],
-        config: dict[str, Any],
+        config:    dict[str, Any],
+        pvs_index: PVSIndex,
+        smoke_sys: SmokeSystem,
         create_ui: bool = True,
     ) -> None:
-        self.istate = istate
-        self.largura = config.get("largura", 10_000)
-        self.altura = config.get("altura", 10_000)
-        self.tamanho_celula = config.get("tamanho_celula", 100)
-        self.n_rays = config.get("n_rays", 360)   # default alto para não perder alvos próximos
-        self.ui = create_ui
-        self.root = None
+        self.map_w     = config["map_w"]
+        self.map_h     = config["map_h"]
+        self.cell_size = config["cell_size"]
+        self.pvs       = pvs_index
+        self.smoke_sys = smoke_sys
+        self.obstacles: list[tuple] = config.get("obstacles", [])
+
+        self._solid = frozenset(
+            (x, y)
+            for (ox, oy, ow, oh, *_) in self.obstacles
+            for x in range(ox, ox + ow)
+            for y in range(oy, oy + oh)
+        )
+
+        # máquina de estados: {obs_pid: {tgt_pid: VisInfo}}
+        self._vis: dict[str, dict[str, VisInfo]] = {}
+
         self.canvas = None
-        if self.ui:
+        self.root   = None
+        if create_ui:
             self.root = tk.Toplevel()
-            self.root.title("Server View (omnisciente)")
-            self.canvas = tk.Canvas(
-                self.root,
-                width=self.largura,
-                height=self.altura,
-                bg="black",
-            )
+            self.root.title("Servidor — visão omnisciente")
+            w = self.map_w * self.cell_size
+            h = self.map_h * self.cell_size
+            self.canvas = tk.Canvas(self.root, width=w, height=h, bg="#0d0d0d")
             self.canvas.pack()
 
-        self.obstaculos: List[tuple] = config.get("obstaculos", [])
-        self.lines_of_sight_by_player: dict[str, list[tuple[int, int, int, int]]] = {}
-        self.last_positions: dict[str, tuple[int, int]] = {}
-        self.obstacles_version = 0
-        self.last_obstacles_version = 0
+    # Helpers
 
-    # Obstáculos
+    def pos_to_cell(self, x: float, y: float) -> Cell:
+        return Cell(int(x), int(y))
 
-    def _generate_obstacle(self) -> tuple:
-        cols = self.largura // self.tamanho_celula
-        rows = self.altura // self.tamanho_celula
-        x = random.randint(0, cols - 1)
-        y = random.randint(0, rows - 1)
-        w = random.randint(max(1, cols // 12), max(1, cols // 6))
-        h = random.randint(max(1, rows // 12), max(1, rows // 6))
-        return (x, y, w, h, "grey", "solid")
+    def is_solid(self, x: int, y: int) -> bool:
+        return (x, y) in self._solid
 
-    def draw_random_obstacles(self) -> None:
-        if not self.obstaculos:
-            for _ in range(random.randint(5, 15)):
-                self.obstaculos.append(self._generate_obstacle())
-            self.obstacles_version += 1
-        if self.canvas:
-            self._redraw_obstacles()
+    def _masked_pos(self, x: float, y: float, z: float) -> tuple:
+        """Posição arredondada para ENTRY_MASK_GRID — usada no tick de entrada."""
+        return (_round_to_grid(x, ENTRY_MASK_GRID),
+                _round_to_grid(y, ENTRY_MASK_GRID),
+                z)
 
-    def _redraw_obstacles(self) -> None:
-        if not self.canvas:
-            return
-        for obs in self.obstaculos:
-            x, y, w, h, cor, estilo = obs
-            x1, y1 = x * self.tamanho_celula, y * self.tamanho_celula
-            x2, y2 = (x + w) * self.tamanho_celula, (y + h) * self.tamanho_celula
-            fill = cor if estilo == "solid" else ""
-            self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=cor)
+    # Máquina de estados de visibilidade
 
-    def _hits_obstacle(self, px: float, py: float) -> bool:
-        gx = px / self.tamanho_celula
-        gy = py / self.tamanho_celula
-        for obs in self.obstaculos:
-            ox, oy, ow, oh, *_ = obs
-            if ox <= gx <= ox + ow and oy <= gy <= oy + oh:
-                return True
-        return False
+    def _update_vis_state(
+        self,
+        obs_pid: str,
+        tgt_pid: str,
+        los_raw: bool,       # resultado bruto do PVS + smoke
+        tgt_pos: tuple,
+        memory:  StateMemory,
+    ) -> None:
+        """Atualiza o estado de visibilidade e escreve na StateMemory."""
 
-    # Raycasting
+        obs_map = self._vis.setdefault(obs_pid, {})
+        vi = obs_map.get(tgt_pid, VisInfo())
+        x, y, *rest = tgt_pos
+        z = rest[0] if rest else 0
 
-    def compute_lines_of_sight(self, pid: str, pos: tuple) -> None:
-        max_dist = max(self.largura, self.altura)
-        step = max(2, self.tamanho_celula // 8)   # passo fino para não "vazar" atrás de paredes
-        x, y, *_ = pos
-        ox = x * self.tamanho_celula + self.tamanho_celula / 2
-        oy = y * self.tamanho_celula + self.tamanho_celula / 2
-        rays: list[tuple[int, int, int, int]] = []
-        for i in range(self.n_rays):
-            angle = (2 * math.pi * i) / self.n_rays
-            dx, dy = math.cos(angle), math.sin(angle)
-            hx, hy = ox + max_dist * dx, oy + max_dist * dy
-            dist = 0.0
-            while dist <= max_dist:
-                sx, sy = ox + dx * dist, oy + dy * dist
-                if sx < 0 or sx > self.largura or sy < 0 or sy > self.altura:
-                    hx, hy = sx, sy
-                    break
-                if self._hits_obstacle(sx, sy):
-                    hx, hy = sx, sy
-                    break
-                dist += step
-            rays.append((int(ox), int(oy), int(hx), int(hy)))
-        self.lines_of_sight_by_player[str(pid)] = rays
-        self.last_positions[str(pid)] = (int(x), int(y))
-        self.last_obstacles_version = self.obstacles_version
+        # transição baseada no estado atual
 
-    def _draw_rays(self, pid: str) -> None:
-        if not self.canvas:
-            return
-        for ox, oy, hx, hy in self.lines_of_sight_by_player.get(str(pid), []):
-            self.canvas.create_line(ox, oy, hx, hy, fill="#330000", width=1)
+        if vi.state == "none":
+            if los_raw:
+                vi.confirm_ticks += 1
+                if vi.confirm_ticks >= HYSTERESIS_TICKS:
+                    # confirmado: entra em ENTERING
+                    vi = VisInfo("entering", 0, 1)
+                    memory.update_enemy(tgt_pid, "entering", self._masked_pos(x, y, z))
+                else:
+                    memory.update_enemy(tgt_pid, "none", None)
+            else:
+                vi = VisInfo("none", 0, 0)
+                memory.update_enemy(tgt_pid, "none", None)
 
-    # Visibilidade
-    def _is_visible(self, rays: list, px: float, py: float) -> bool:
-        """Verifica se o ponto (px, py) é coberto por algum raio.
+        elif vi.state == "entering":
+            if not los_raw:
+                # saiu do LOS durante entry masking — volta a none
+                vi = VisInfo("none", 0, 0)
+                memory.update_enemy(tgt_pid, "none", None)
+            elif vi.entry_ticks >= ENTRY_MASK_TICKS:
+                # mascaramento concluído — promove para visible com posição exata
+                vi = VisInfo("visible", 0, 0)
+                memory.update_enemy(tgt_pid, "full", tgt_pos)
+            else:
+                vi.entry_ticks += 1
+                memory.update_enemy(tgt_pid, "entering", self._masked_pos(x, y, z))
 
-        Threshold menor para evitar falsos positivos
-        atrás de paredes finas.
-        """
-        thresh = (self.tamanho_celula * 0.45) ** 2
-        for ox, oy, hx, hy in rays:
-            rx, ry = hx - ox, hy - oy
-            rlen2 = rx * rx + ry * ry
-            if rlen2 == 0:
-                continue
-            t = ((px - ox) * rx + (py - oy) * ry) / rlen2
-            if t < 0 or t > 1:
-                continue
-            cxp = ox + rx * t
-            cyp = oy + ry * t
-            if (px - cxp) ** 2 + (py - cyp) ** 2 <= thresh:
-                return True
-        return False
+        elif vi.state == "visible":
+            if not los_raw:
+                vi.confirm_ticks += 1
+                if vi.confirm_ticks >= HYSTERESIS_TICKS:
+                    # confirmado: saiu de LOS → none (DR assume)
+                    vi = VisInfo("none", 0, 0)
+                    memory.update_enemy(tgt_pid, "none", None)
+                else:
+                    # ainda "visible" por histerese — mantém última posição
+                    memory.update_enemy(tgt_pid, "full", tgt_pos)
+            else:
+                vi = VisInfo("visible", 0, 0)
+                memory.update_enemy(tgt_pid, "full", tgt_pos)
 
-    # Tick do servidor
+        obs_map[tgt_pid] = vi
+
+    # Tick principal
 
     def tick(
         self,
-        state: dict[str, Any],
-        client_id: str,
-        memory: StateMemory,
-        radius: float = 999.0,   # sem limite de distância por padrão
+        state:    dict[str, Any],
+        memories: dict[str, StateMemory],
     ) -> None:
-        """Executa um tick:
-        1. Renova raios se o jogador moveu
-        2. Classifica cada inimigo: visível → full exato | não visível → none
-        3. Escreve na StateMemory
-        """
-        positions = state.get("positions", {})
-        client_pos = positions.get(client_id)
-        if client_pos is None:
-            return
+        positions = state["positions"]
+        team_map  = state["teams"]
+        smokes    = self.smoke_sys.active_smokes()
 
-        cx, cy, *_ = client_pos
-        last = self.last_positions.get(str(client_id))
-        if last != (int(cx), int(cy)) or self.last_obstacles_version != self.obstacles_version:
-            self.compute_lines_of_sight(client_id, client_pos)
+        for obs_pid, obs_pos in positions.items():
+            obs_x, obs_y, *_ = obs_pos
+            obs_cell = self.pos_to_cell(obs_x, obs_y)
+            obs_team = team_map[obs_pid]
+            mem      = memories[obs_pid]
 
-        rays = self.lines_of_sight_by_player.get(str(client_id), [])
+            mem.set_obstacles(self.obstacles)
+            mem.set_smokes(self.smoke_sys.get_snapshot())
+            mem.update_ally(obs_pid, obs_pos)
 
-        for pid, pos in positions.items():
-            x, y, *rest = pos
-            z = rest[0] if rest else 0
+            visible_cells = self.pvs.visible_from(obs_cell)
 
-            if pid == client_id:
-                memory.update(pid, "full", (x, y, z))
-                continue
+            for tgt_pid, tgt_pos in positions.items():
+                if tgt_pid == obs_pid:
+                    continue
+                tgt_x, tgt_y, *_ = tgt_pos
+                tgt_cell  = self.pos_to_cell(tgt_x, tgt_y)
+                same_team = team_map[tgt_pid] == obs_team
 
-            # centro do boneco em pixels
-            px = x * self.tamanho_celula + self.tamanho_celula / 2
-            py = y * self.tamanho_celula + self.tamanho_celula / 2
+                if same_team:
+                    mem.update_ally(tgt_pid, tgt_pos)
+                    continue
 
-            if self._is_visible(rays, px, py):
-                # VISÍVEL → posição exata
-                memory.update(pid, "full", (x, y, z))
-            else:
-                # NÃO VISÍVEL → nada (DR cuida do pop-in, se necessário)
-                memory.update(pid, "none", None)
+                # PVS lookup 
+                in_pvs = tgt_cell in visible_cells
 
-        memory.set_obstacles(self.obstaculos)
+                # smoke override 
+                if in_pvs:
+                    blocked = self.smoke_sys.blocks_los(
+                        obs_x + 0.5, obs_y + 0.5,
+                        tgt_x + 0.5, tgt_y + 0.5,
+                    )
+                    los_raw = not blocked
+                else:
+                    los_raw = False
 
-    # Desenho servidor (omnisciente)
+                self._update_vis_state(obs_pid, tgt_pid, los_raw, tgt_pos, mem)
+
+        self.smoke_sys.tick()
+
+    # Smoke spawn aleatório
+
+    def maybe_spawn_smoke(self, state: dict, prob: float = 0.002) -> None:
+        if random.random() < prob:
+            for _ in range(50):
+                sx = random.randint(5, self.map_w - 5)
+                sy = random.randint(5, self.map_h - 5)
+                if not self.is_solid(sx, sy):
+                    self.smoke_sys.add_smoke(sx, sy, radius=3.0, duration_ticks=600)
+                    break
+
+    # Desenho servidor
 
     def draw(self, state: dict[str, Any]) -> None:
         if not self.canvas or not self.root:
             return
         self.canvas.delete("all")
-        self._redraw_obstacles()
-        # raios do player1 (semi-transparente para não poluir)
-        self._draw_rays("player1")
+        cs = self.cell_size
+
+        for obs in self.obstacles:
+            ox, oy, ow, oh, *_ = obs
+            self.canvas.create_rectangle(
+                ox*cs, oy*cs, (ox+ow)*cs, (oy+oh)*cs,
+                fill="#444", outline="#666",
+            )
+
+        for s in self.smoke_sys.active_smokes():
+            r = s.radius * cs
+            self.canvas.create_oval(
+                s.cx*cs - r, s.cy*cs - r, s.cx*cs + r, s.cy*cs + r,
+                fill="#88aaaa", outline="#aadddd", stipple="gray50",
+            )
+
+        team_map = state["teams"]
         for pid, pos in state["positions"].items():
             x, y, *_ = pos
-            cx = x * self.tamanho_celula + self.tamanho_celula / 2
-            cy = y * self.tamanho_celula + self.tamanho_celula / 2
-            r = max(4, self.tamanho_celula // 4)
-            color = "red" if str(pid).startswith("enemy") else "cyan"
-            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color)
-            lbl_color = "white"
-            self.canvas.create_text(cx, cy - r - 4, text=str(pid), fill=lbl_color, font=("Courier", 7))
+            cx_px = x*cs + cs/2
+            cy_px = y*cs + cs/2
+            r     = max(3, cs//3)
+            color = "#4488ff" if team_map.get(pid) == "team_a" else "#ff4444"
+            self.canvas.create_oval(cx_px-r, cy_px-r, cx_px+r, cy_px+r,
+                                    fill=color, outline="white", width=1)
+            self.canvas.create_text(cx_px, cy_px-r-3, text=pid[-2:],
+                                    fill="white", font=("Courier", 6))
+
         self.root.update_idletasks()
         self.root.update()
-
-    # Alias para compatibilidade com benchmark
-    def update_visibility(self, state, client_id, memory, fov_deg=90.0, radius=999.0, dir_angle=0.0):
-        self.tick(state, client_id, memory, radius)

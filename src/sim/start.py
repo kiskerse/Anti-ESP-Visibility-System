@@ -1,167 +1,141 @@
+"""
+Entry point — 128 TPS com TickClock preciso.
+
+Janelas:
+  1. Servidor (omnisciente)
+  2. Cliente player_a1 (team A)
+  3. ESP protegido  (ClientPacket filtrado)
+  4. ESP desprotegido (state bruto)
+
+Teclas:
+  WASD  — move player_a1
+  R     — toggle IA
+  H     — toggle janelas ESP
+  Space — smoke no centro do mapa
+  T     — mostra stats do TickClock no terminal
+"""
 from __future__ import annotations
 
-import os, random, sys, tkinter as tk
+import os, sys, random, tkinter as tk
 from typing import Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from security.pvs   import load_or_build
+from security.smoke import SmokeSystem
 from security.state import StateMemory
-from sim.client import Client
-from sim.game import Game
-from sim.players import Players
+from sim.game       import Game
+from sim.client     import Client
+from sim.players    import Players
+from sim.map_gen    import generate_map, spawn_players
 from sim.wallhack_esp import WallhackESP
+from sim.tick_clock import TickClock
+
+HUMAN_PID   = "player_a1"
+MAP_W       = 60
+MAP_H       = 60
+CELL_SIZE   = 14
+N_OBSTACLES = 45
+TARGET_TPS  = 128
+CLIENT_FPS  = 60
+AI_EVERY    = 2    # move a cada 2 ticks (64 Hz movimento)
+CACHE_PATH  = os.path.join(
+    os.path.dirname(__file__), "..", "pvs_cache_60x60_s42.pkl.gz"
+)
 
 
-def startGame(
-    config: dict[str, Any],
-    state:  dict[str, Any],
-    ai_movement:         bool = True,
-    ai_move_every_n_ticks: int = 3,
-    show_wallhack_protected:   bool = True,   # ESP lendo ClientPacket (protegido)
-    show_wallhack_unprotected: bool = True,   # ESP lendo state bruto (sem proteção)
-) -> None:
-    root = tk.Tk()
-    root.title("Servidor  |  WASD = mover  |  R = toggle IA  |  H = toggle ESP")
+def run() -> None:
+    print("[MAP] Gerando mapa 60×60, 45 obstáculos...")
+    obstacles, solid = generate_map(MAP_W, MAP_H, N_OBSTACLES, seed=42)
+    positions, teams = spawn_players(MAP_W, MAP_H, solid, 5, 5)
 
-    memory = StateMemory()
-    game   = Game(istate={}, config=config, create_ui=True)
-    game.draw_random_obstacles()
-    state["obstacles"] = game.obstaculos
-    memory.set_obstacles(game.obstaculos)
+    pvs_idx   = load_or_build(MAP_W, MAP_H, obstacles, CACHE_PATH)
+    smoke_sys = SmokeSystem()
 
-    for pid, pos in state["positions"].items():
-        game.compute_lines_of_sight(pid, pos)
+    print(f"[PVS] {pvs_idx.stats()}")
+    print(f"[SERVER] Target: {TARGET_TPS} TPS  Budget: {1000/TARGET_TPS:.4f}ms/tick")
 
+    config = {"map_w": MAP_W, "map_h": MAP_H, "cell_size": CELL_SIZE, "obstacles": obstacles}
+    state: dict[str, Any] = {
+        "map_w": MAP_W, "map_h": MAP_H,
+        "map_width": MAP_W, "map_height": MAP_H,
+        "positions": positions, "teams": teams, "obstacles": obstacles,
+    }
+
+    memories: dict[str, StateMemory] = {
+        pid: StateMemory(rtt_ms=30.0) for pid in positions
+    }
+
+    root   = tk.Tk()
+    root.title(f"Servidor {TARGET_TPS}TPS  |  WASD=mover  R=IA  H=ESP  Space=smoke  T=stats")
+
+    game   = Game(config, pvs_idx, smoke_sys, create_ui=True)
     player = Players()
-    cell   = config.get("tamanho_celula", 50)
+    clock  = TickClock(target_tps=TARGET_TPS)
 
-    client = Client(
-        client_id="player1",
-        cell_size=cell,
-        map_w=state["map_width"],
-        map_h=state["map_height"],
-        fps=config.get("client_fps", 60),
-    )
+    client = Client(HUMAN_PID, CELL_SIZE, MAP_W, MAP_H, CLIENT_FPS, team="team_a")
+    esp_p  = WallhackESP(CELL_SIZE, MAP_W, MAP_H, CLIENT_FPS, False, "team_a")
+    esp_r  = WallhackESP(CELL_SIZE, MAP_W, MAP_H, CLIENT_FPS, True,  "team_a")
 
-    # ESP protegido — lê ClientPacket (o mesmo que o cliente legítimo)
-    esp_prot = WallhackESP(cell, state["map_width"], state["map_height"],
-                           fps=config.get("client_fps", 60), sem_protecao=False) \
-               if show_wallhack_protected else None
-
-    # ESP desprotegido — lê state bruto (jogo sem proteção)
-    esp_raw  = WallhackESP(cell, state["map_width"], state["map_height"],
-                           fps=config.get("client_fps", 60), sem_protecao=True) \
-               if show_wallhack_unprotected else None
-
-    ai_ref  = {"active": ai_movement}
+    ai_ref  = {"active": True}
     esp_ref = {"active": True}
+    tick_n  = [0]
 
-    def _handle_key(event):
+    def handle_key(event):
         k = getattr(event, "keysym", None)
         if k == "r":
             ai_ref["active"] = not ai_ref["active"]
-            root.title(f"Servidor | IA {'ON' if ai_ref['active'] else 'OFF'}")
+            root.title(f"Servidor {TARGET_TPS}TPS | IA={'ON' if ai_ref['active'] else 'OFF'}")
         elif k == "h":
             esp_ref["active"] = not esp_ref["active"]
+        elif k == "space":
+            smoke_sys.add_smoke(MAP_W//2, MAP_H//2, radius=4.0, duration_ticks=600)
+        elif k == "t":
+            stats = clock.stats()
+            print(f"\n[TickClock] {stats}")
         else:
-            player.move_using_keyboard(event, state, state["map_width"], state["map_height"])
+            player.move_keyboard(event, state, solid, HUMAN_PID)
 
-    root.bind("<KeyPress>", lambda e: _handle_key(e))
+    root.bind("<KeyPress>", handle_key)
 
-    server_fps      = config.get("server_fps", 60)
-    server_interval = int(max(1, 1000 / server_fps))
-    tick_counter    = [0]
+    # intervalo do tick do servidor em ms para after()
+    # nota: Tkinter after() tem granularidade de ~1ms; para 128 TPS (7.8ms)
+    # isso é aceitável para simulação visual
+    server_interval_ms = int(1000 / TARGET_TPS)
+
+    clock.start()
 
     def tick():
-        tick_counter[0] += 1
+        tick_n[0] += 1
+        clock.wait_next_tick()
 
-        if ai_ref["active"] and tick_counter[0] % ai_move_every_n_ticks == 0:
-            player.move_all_enemies(state)
+        if ai_ref["active"] and tick_n[0] % AI_EVERY == 0:
+            player.move_all_ai(state, solid, HUMAN_PID)
 
-        try:
-            game.tick(state, "player1", memory)
-            packet = memory.get_client_packet(cell)
+        game.maybe_spawn_smoke(state, prob=0.002)
+        game.tick(state, memories)
 
-            # cliente legítimo
-            client.deliver_packet(packet)
+        pkt = memories[HUMAN_PID].get_client_packet(HUMAN_PID, CELL_SIZE)
+        client.deliver_packet(pkt)
 
-            if esp_ref["active"]:
-                # ESP protegido: recebe o mesmo ClientPacket que o cliente legítimo
-                if esp_prot:
-                    esp_prot.deliver_packet(packet)
+        if esp_ref["active"]:
+            esp_p.deliver_packet(pkt)
+            visible_legit = {
+                pid for pid in pkt.all_enemy_pids() if pkt.level(pid) == "full"
+            }
+            esp_r.deliver_raw(state, visible_legit)
 
-                # ESP desprotegido: recebe o state bruto + set de quem o legítimo vê
-                if esp_raw:
-                    visible_legit = {
-                        pid for pid in packet.all_pids()
-                        if packet.level(pid) == "full" and pid != "player1"
-                    }
-                    esp_raw.deliver_raw_state(state, visible_legit)
+        clock.end_tick()
 
+        # redesenha servidor a cada 4 ticks (32 Hz visual para poupar CPU)
+        if tick_n[0] % 4 == 0:
             game.draw(state)
-        except Exception as e:
-            print(f"[tick error] {e}")
 
-        root.after(server_interval, tick)
+        root.after(server_interval_ms, tick)
 
     root.after(200, tick)
     root.mainloop()
 
+
 if __name__ == "__main__":
-    # Mapa maior e mais realista (40×40, mais obstáculos)
-    map_w, map_h, cell = 40, 40, 30
-    cfg = {
-        "largura":        map_w * cell,
-        "altura":         map_h * cell,
-        "tamanho_celula": cell,
-        "n_rays":         360,
-        "server_fps":     60,
-        "client_fps":     60,
-    }
-
-    _game = Game({}, cfg, create_ui=False)
-    # força mais obstáculos para mapa realista
-    import types as _t
-    _orig = _game._generate_obstacle
-    _count = [0]
-    obstacles: list = []
-    while len(obstacles) < 25:
-        o = _orig()
-        obstacles.append(o)
-    _game.obstaculos = obstacles
-
-    def blocked(x: int, y: int) -> bool:
-        for obs in obstacles:
-            ox, oy, ow, oh, *_ = obs
-            if ox <= x <= ox + ow - 1 and oy <= y <= oy + oh - 1:
-                return True
-        return False
-
-    def free_cell(occupied: set) -> tuple[int, int]:
-        for _ in range(5000):
-            x = random.randint(0, map_w - 1)
-            y = random.randint(0, map_h - 1)
-            if (x, y) not in occupied and not blocked(x, y):
-                return x, y
-        raise RuntimeError("Sem célula livre")
-
-    occupied: set[tuple[int, int]] = set()
-    state: dict[str, Any] = {
-        "map_width":  map_w,
-        "map_height": map_h,
-        "positions":  {},
-        "obstacles":  obstacles,
-    }
-
-    px, py = free_cell(occupied); occupied.add((px, py))
-    state["positions"]["player1"] = (px, py, 0)
-
-    for i in range(1, 9):   # 8 inimigos para mapa realista
-        ex, ey = free_cell(occupied); occupied.add((ex, ey))
-        state["positions"][f"enemy{i}"] = (ex, ey, 0)
-
-    startGame(cfg, state,
-              ai_movement=True,
-              ai_move_every_n_ticks=3,
-              show_wallhack_protected=True,
-              show_wallhack_unprotected=True)
+    run()
